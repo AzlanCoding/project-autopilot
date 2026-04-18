@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Autopilot Web Console</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 800px;
+        }
+        h1 {
+            color: #0056b3;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .auth-section, .status-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+        input[type="text"], input[type="password"], button {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #28a745;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #218838;
+        }
+        .status-item {
+            margin-bottom: 10px;
+            padding: 10px;
+            border-bottom: 1px dashed #eee;
+        }
+        .status-item strong {
+            display: inline-block;
+            width: 120px;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Project Autopilot Web Console Dashboard</h1>
+
+        <!-- Login Section -->
+        <div class="auth-section">
+            <h2>Admin Login</h2>
+            <p>Use credentials set in the CONSOLE_SECRET_PASSWORD environment variable.</p>
+            <input type="text" id="username" placeholder="Username">
+            <input type="password" id="password" placeholder="Password">
+            <button onclick="login()">Log In</button>
+            <p id="loginMessage" style="margin-top: 10px;"></p>
+        </div>
+
+        <!-- Status Section (Placeholder for protected content) -->
+        <div class="status-section" id="statusArea" style="display: none;">
+            <h2>System Status</h2>
+            <div id="botStatus">
+                <!-- Status data will be injected here -->
+            </div>
+
+            <h2 style="margin-top: 20px;">Action Center</h2>
+            <button onclick="fetchLogs()">View Logs (Placeholder)</button>
+            <p id="logMessage" style="margin-top: 10px; font-style: italic;"></p>
+        </div>
+    </div>
+
+    <script>
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const messageEl = document.getElementById('loginMessage');
+            messageEl.textContent = 'Logging in...';
+
+            try {
+                const response = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const result = await response.json();
+                messageEl.textContent = '';
+
+                if (result.success) {
+                    messageEl.style.color = 'green';
+                    messageEl.textContent = 'Login successful! Dashboard updated.';
+                    document.getElementById('statusArea').style.display = 'block';
+                    loadStatus();
+                } else {
+                    messageEl.style.color = 'red';
+                    messageEl.textContent = result.message || 'Login failed.';
+                    document.getElementById('statusArea').style.display = 'none';
+                }
+            } catch (error) {
+                messageEl.style.color = 'red';
+                messageEl.textContent = 'Error connecting to the server.';
+            }
+        }
+
+        async function loadStatus() {
+            try {
+                const response = await fetch('/api/admin/status');
+                const data = await response.json();
+
+                const statusDiv = document.getElementById('botStatus');
+                statusDiv.innerHTML = `
+                    <div class="status-item"><strong>Status:</strong> ${data.status}</div>
+                    <div class="status-item"><strong>Uptime:</strong> ${data.uptime}</div>
+                    <div class="status-item"><strong>Last Error:</strong> ${data.lastError || 'None'}</div>
+                `;
+            } catch (error) {
+                document.getElementById('botStatus').innerHTML = '<p style="color: red;">Could not load system status. Check server connection.</p>';
+            }
+        }
+        
+        async function fetchLogs() {
+             const messageEl = document.getElementById('logMessage');
+             messageEl.textContent = 'Fetching logs...';
+             try {
+                 // Assuming JID 'system' for testing
+                 const response = await fetch('/api/admin/logs?jid=system&limit=10');
+                 const data = await response.json();
+                 
+                 if (data.success) {
+                     messageEl.innerHTML = `Successfully loaded ${data.logs.length} logs.<br>Latest entry: ${JSON.stringify(data.logs[data.logs.length - 1])}`;
+                 } else {
+                     messageEl.textContent = `Failed to load logs: ${data.message}`;
+                 }
+             } catch (error) {
+                 messageEl.textContent = 'Error fetching logs.';
+             }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+.env
+node_modules/*
+dist/*
+wa-logs.txt
+assets/*
+!assets/.gitkeep
+config/*
+volumes/*
+*.log

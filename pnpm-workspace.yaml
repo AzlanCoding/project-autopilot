@@ -1,0 +1,4 @@
+onlyBuiltDependencies:
+  - baileys
+  - protobufjs
+  - sharp
