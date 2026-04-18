@@ -1,5 +1,5 @@
 import * as readline from 'readline';
-import { ChatOpenAI, ChatOpenAICallOptions } from "@langchain/openai";
+import { ChatOpenAI } from "@langchain/openai";
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import {
@@ -16,7 +16,6 @@ import { BaseLanguageModelInput } from '@langchain/core/language_models/base';
 import { MessageStructure, MessageToolSet } from '@langchain/core/messages';
 import { Runnable } from '@langchain/core/runnables';
 import Store from './store';
-import { ChatOllama } from '@langchain/ollama'
 import { formatDateTime } from '../utils/common';
 import { User } from '../models/User';
 import getCalendarEvents from '../utils/getCalendarEvents';
@@ -497,12 +496,15 @@ export default class AI {
     //   }
     // }).bindTools(this.tools);
 
-    this.model = new ChatOllama();
+    this.model = new ChatOpenAI();
 
     this.bindModel = () => { // Reload tools for AI.
-      this.model = new ChatOllama({
-        model: 'qwen3.5:latest',
-        numCtx: 4096 * 4
+      this.model = new ChatOpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'qwen3.5-flash',
+        configuration: {
+          baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        }
       }).bindTools(this.tools)
     }
     this.bindModel();
@@ -566,7 +568,7 @@ export default class AI {
       // 🔁 Recursive stream handler
       const handleStream = async function* (
         stream: any,
-        model: Runnable<BaseLanguageModelInput, AIMessageChunk<MessageStructure<MessageToolSet>>, ChatOpenAICallOptions>
+        model: ReturnType<ChatOpenAI['bindTools']>
       ): AsyncGenerator<any> {
         for await (const chunk of stream) {
 
@@ -706,9 +708,12 @@ export default class AI {
       return false
     };
     const messages = history.map(m => m.type == 'ai' ? `AI: ${m.content}` : m.content).join('\n\n');
-    const model = new ChatOllama({
-      model: 'qwen3.5:latest',
-      numCtx: 4096 * 4,
+    const model = new ChatOpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      model: 'qwen-flash',
+      configuration: {
+        baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      }
     }).withStructuredOutput(z.object({
       shouldRespond: z.boolean().describe("Whether or not the AI model Sofia should reply or not.")
     }))

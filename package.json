@@ -15,7 +15,6 @@
     "@cacheable/node-cache": "^2.0.1",
     "@hapi/boom": "^10.0.1",
     "@langchain/core": "^1.1.39",
-    "@langchain/ollama": "^1.2.6",
     "@langchain/openai": "^1.4.4",
     "@zilliz/milvus2-sdk-node": "^2.6.13",
     "axios": "^1.15.0",

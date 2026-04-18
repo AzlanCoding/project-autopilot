@@ -87,8 +87,8 @@ export default class Store {
   async getEmbedding(text: string): Promise<number[]> {
     const embeddings = new OpenAIEmbeddings({
       apiKey: process.env.OPENAI_API_KEY,
-      modelName: process.env.EMBEDDING_MODEL ?? 'qwen3-embedding:latest',
-      configuration: { baseURL: process.env.EMBEDDING_BASE_URL ?? 'http://localhost:11434/v1' }
+      modelName: 'text-embedding-v4',
+      configuration: { baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" }
     });
     return await embeddings.embedQuery(text);
   }
