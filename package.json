@@ -14,12 +14,11 @@
     "@akashrajpurohit/snowflake-id": "^2.0.0",
     "@cacheable/node-cache": "^2.0.1",
     "@hapi/boom": "^10.0.1",
-    "@langchain/core": "^1.1.39",
+    "@langchain/core": "^1.1.40",
     "@langchain/openai": "^1.4.4",
     "@zilliz/milvus2-sdk-node": "^2.6.13",
     "axios": "^1.15.0",
     "baileys": "7.0.0-rc.9",
-    "baileys-bottle": "^2.1.2",
     "baileys-bottle-devstroupe": "^2.3.66",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
@@ -40,7 +39,15 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node-schedule": "^2.1.8",
-    "@types/qrcode-terminal": "^0.12.2",
-    "sequelize-cli": "^6.6.5"
+    "@types/qrcode-terminal": "^0.12.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "protobufjs": "^7.5.5",
+      "typeorm": "^0.3.28",
+      "minimatch": "^3.1.5",
+      "music-metadata": "^11.12.3",
+      "xml2js": "^0.6.2"
+    }
   }
 }
