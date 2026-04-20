@@ -11,6 +11,7 @@ import { User } from '../models/User';
 import { UserService } from './userService';
 import type AI from './ai';
 import { type Logger } from 'pino';
+import { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.js';
 
 const SETTINGS_PATH = './assets/settings.json';
 interface AppSettings { subjects: { [k: string]: string }; reminders: number[]; }
@@ -26,7 +27,7 @@ export default class Store {
   user: UserService;
   private logger: Logger;
 
-  ai_scheduled_task_runner?: (message: () => Promise<string>) => Promise<void>
+  ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>) => Promise<void>
 
   constructor(logger: Logger) {
     this.logger = logger;
@@ -86,15 +87,16 @@ export default class Store {
   // Embedding provider: replace modelName/config as needed
   async getEmbedding(text: string): Promise<number[]> {
     const embeddings = new OpenAIEmbeddings({
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey: process.env.ALIBABA_API_KEY,
       modelName: 'text-embedding-v4',
+      dimensions: 2048,
       configuration: { baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" }
     });
     return await embeddings.embedQuery(text);
   }
 
   // Ensure collection exists and index is created
-  async ensureMilvusCollection(dim = 4096) {
+  async ensureMilvusCollection(dim = 2048) {
     const name = this.milvusCollectionName;
     const has = await this.milvus.hasCollection({ collection_name: name });
     if (!has.value) {

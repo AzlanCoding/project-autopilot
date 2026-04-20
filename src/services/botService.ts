@@ -234,12 +234,13 @@ export class SofiaBot {
                     this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
                       await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!)
                       const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
-                      console.dir(chatHistory);
                       if (chatHistory[chatHistory.length - 1].user != 'AI') {
                         // // TODO: Map User ID and procees chat and send response 
                         // await this.sock!.sendMessage(msg.key.remoteJid!, { text: "PROCESS DEBUG" })
 
-                        const chatHistoryParsed = (await this.db.user.formatAndMergeMessages(chatHistory)).slice(-20);// Limit to 20 messages
+                        const chatHistoryParsed = (await this.db.user.formatAndMergeMessages(chatHistory)).slice(-7);// Limit to 7 messages
+                        console.dir(chatHistoryParsed);
+                        this.logger.trace(chatHistoryParsed);
                         if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.includes('@Sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
                           await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
                           this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
@@ -247,8 +248,8 @@ export class SofiaBot {
                         }
                         let systemPrompt;
                         if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
-                          let grpName = (await this.store?.contacts.id(msg.key.remoteJid)).name || "Unknown Group Chat";
-                          systemPrompt = await this.ai.generatePrompt('group', msg.key.remoteJid, msg.key.remoteJid);
+                          let grpName = (await this.store?.contacts.id(msg.key.remoteJid))?.name || "Unknown Group Chat";
+                          systemPrompt = await this.ai.generatePrompt('group', grpName, msg.key.remoteJid);
                         }
                         else if (msg.key.remoteJidAlt) {
                           const current_user = await this.db.user.getUserByJid(msg.key.remoteJidAlt)
@@ -266,7 +267,7 @@ export class SofiaBot {
                           return;
                         }
                         let firstMsg = true;
-                        const streamGenerator = this.ai.processChat([new SystemMessage(systemPrompt), ...chatHistoryParsed]);
+                        const streamGenerator = this.ai.processChatv2([new SystemMessage(systemPrompt), ...chatHistoryParsed]);
 
                         const replyMsg: WAMessage = {
                           message: {
@@ -291,11 +292,11 @@ export class SofiaBot {
                               process.stdout.write("\n-------------------------------\n");
                             }
                             if (firstMsg) {
-                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content }, { quoted: replyMsg });
+                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string }, { quoted: replyMsg });
                               firstMsg = false;
                             }
                             else {
-                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content })
+                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
                             }
                           } else if (yieldState.type === 'done') {
                             break; // Exit the loop after the full content is collected
@@ -370,6 +371,9 @@ export class SofiaBot {
     }
 
     let messages = await this.store.messages.all(remoteJidAlt || remoteJid)
+    if (remoteJidAlt) {
+      messages = [...messages, ...(await this.store.messages.all(remoteJid))]
+    }
     const parseMentions = async (m: WAMessage | proto.IMessage, text?: string | null) => {
       if (!text) {
         return text;

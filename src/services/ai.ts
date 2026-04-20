@@ -9,23 +9,29 @@ import {
   AIMessage,
   ToolMessage,
   DynamicStructuredTool,
-  AIMessageChunk
 } from 'langchain';
 import { z } from "zod";
-import { BaseLanguageModelInput } from '@langchain/core/language_models/base';
-import { MessageStructure, MessageToolSet } from '@langchain/core/messages';
-import { Runnable } from '@langchain/core/runnables';
+import { OpenAI } from "openai";
+// import { ChatOllama } from '@langchain/ollama'
 import Store from './store';
 import { formatDateTime } from '../utils/common';
 import { User } from '../models/User';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
+import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses.js';
 
 export default class AI {
   ai_user_id: string = "ea502c0f-7fe6-4f7c-9d63-80dd7b0de90e";
-  test_mode: boolean = true;
+  test_mode: boolean = false;
   logger: Logger;
   db: Store;
+  openai = new OpenAI(
+    {
+      apiKey: process.env.ALIBABA_API_KEY,
+      baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    }
+  );
+
 
   // Tools will be initialized in constructor so they can reference this.db
   getCurrentTimeTool: DynamicStructuredTool;
@@ -201,7 +207,7 @@ export default class AI {
           }
           const created = await this.db.assignment.create({ subject, title, description, dueDate: (new Date(dueDate)).getTime() });
           const result = created?.toJSON ? created.toJSON() : created;
-          return JSON.stringify({ ...result, date: result?.dueDate ? formatDateTime(Number(result?.dueDate)) : result?.dueDate })
+          return JSON.stringify({ ...result, dueDate: result?.dueDate ? formatDateTime(Number(result?.dueDate)) : result?.dueDate })
         } catch (err: any) {
           return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs: {subject: string, title: string, description: string, dueDate: string}`;
         }
@@ -460,7 +466,7 @@ export default class AI {
 
     this.timetableTool = new DynamicStructuredTool({
       name: "get_timetable",
-      description: "Get the timetable for a specific day",
+      description: "Get the timetable for a specific day. Note that events that start with (ELEARN) are e-learning lessons and can be done at any time.",
       schema: z.object({
         date: z.string().optional().describe("[Optional] The date of the timetable in the format DD/MM/YYYY. If not provided, it will return the current day's timetable."),
       }),
@@ -500,26 +506,34 @@ export default class AI {
 
     this.bindModel = () => { // Reload tools for AI.
       this.model = new ChatOpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-        model: 'qwen3.5-flash',
+        apiKey: process.env.ALIBABA_API_KEY,
+        // model: 'gpt-4o-mini',
+        model: 'qwen3.6-flash',
         configuration: {
           baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
         }
       }).bindTools(this.tools)
+      // this.model = new ChatOllama({
+      //   model: "qwen3.5:latest",
+      //   numCtx: 4096 * 4
+      //   // model: 'qwen3.5-flash',
+      //   // configuration: {
+      //   //   baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      //   // }
+      // }).bindTools(this.tools)
     }
     this.bindModel();
 
-    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>) => {
+    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.6-plus" }) => {
       // 1. Read the System Prompt from the file
       const systemPromptPath = path.resolve("src/static/prompts/system.md");
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavaliable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
-      Avaliable Tool Calls: ${this.tools.map(t => t.name).join(', ')}
       IMPORTANT: This chat is triggered automatically by the system due to a scheduled task. SEND YOUR REPLY USING THE send_message TOOL CALL ONLY! ONLY 1 USER MESSAGE WILL BE SENT! FOLLOW THE USER INSTRUCTIONS IMMEDIATELY! DO NOT ASK FOR CONFIRMATION!
       GROUP CHATS: ${await this.listGroupsTool!.func({})}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
       const chatHistory: BaseMessage[] = [new SystemMessage(systemPrompt), new HumanMessage(await message())]
-      const streamGenerator = this.processChat(chatHistory);
+      const streamGenerator = this.processChatv2(chatHistory, undefined, modelOptions);
       for await (const yieldState of streamGenerator) {
         if (yieldState.type === 'chunk_display') {
           this.logger.warn(`SCHEDULED TASK YIELDED CONTENT: ${yieldState.content as string}`);
@@ -590,6 +604,7 @@ export default class AI {
 
             // 2. Execute all tools
             for (const toolCall of toolCalls) {
+              console.dir(toolCall);
               console.log(`Called ${toolCall.name}`)
               const tool = toolMap[toolCall.name];
 
@@ -685,6 +700,254 @@ export default class AI {
     }
   }
 
+
+  /**
+   * Same behavior as the original processChat but implemented using the official OpenAI Node.js Responses streaming API.
+   *
+   * Notes / assumptions:
+   * - `this.openai` is an instance of `new OpenAI({ apiKey })`.
+   * - `this.modelName` is the model id to call (e.g., "gpt-4o-mini" or "gpt-4o").
+   * - `this.tools` is an array of DynamicStructuredTool objects with `.name` and `.invoke(args)` (or `.invoke` signature).
+   * - `this.memoryQueryTool.func` exists and returns memory results for the given query.
+   * - `chatHistory` uses the same message classes as in the original code.
+   *
+   * Adjust imports and minor details to match your codebase.
+   */
+  async * processChatv2(
+    chatHistory: BaseMessage[],
+    userInput?: string,
+    additionalOptions: Partial<ResponseCreateParamsStreaming> = {}
+  ) {
+    // Add user message to history if provided
+    if (userInput) {
+      const userMessage = new HumanMessage(userInput);
+      chatHistory.push(userMessage);
+    }
+
+    // Build tool map for quick lookup
+    const toolMap: Record<string, DynamicStructuredTool> = Object.fromEntries(
+      this.tools.map((t: DynamicStructuredTool) => [t.name, t])
+    );
+
+    try {
+      console.log("\n🤖 Thinking (v2 with official OpenAI client)...");
+
+      // Query memory and add a system hint if relevant
+      const memory = await this.memoryQueryTool.func({ queryText: userInput });
+      if (Array.isArray(memory) && memory.length > 0) {
+        chatHistory.push(new SystemMessage(`Possibly relevant memory data: ${memory}`));
+      }
+
+      // Convert chatHistory to the shape expected by the OpenAI Responses API
+      const buildMessagesForOpenAI: (history: BaseMessage[]) => Array<ResponseInputItem> = (history) =>
+        history.map((m) => {
+          // Map your message classes to role/content pairs
+          if (m instanceof HumanMessage) {
+            return { role: "user", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+          }
+          if (m instanceof AIMessage) {
+            if (m.tool_calls) {
+              for (let i = 0; i < m.tool_calls.length; i++) {
+                return {
+                  call_id: (m.tool_calls[i] as any).id,
+                  arguments: (m.tool_calls[i] as any).args instanceof String ? (m.tool_calls[i] as any).args : JSON.stringify((m.tool_calls[i] as any).args),
+                  name: (m.tool_calls[i] as any).name, type: 'function_call'
+                } as ResponseFunctionToolCall
+              }
+            }
+            else {
+              return { role: "assistant", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+            }
+          }
+          if (m instanceof SystemMessage) {
+            return { role: "system", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+          }
+          if (m instanceof ToolMessage) {
+            // ToolMessage is treated as assistant content (tool output)
+            return { output: m.content, call_id: m.tool_call_id || m.id, type: "function_call_output" } as ResponseInputItem.FunctionCallOutput;
+          }
+          // Fallback
+          return { role: "user", content: ((m as any).content ?? "") as string, type: "message" } as EasyInputMessage;
+        });
+
+
+      // We'll accumulate the full assistant text and a small buffer for chunked yields
+      let fullResponseContent = "";
+      let buffer = "";
+
+      // Helper to flush buffer as chunk_display
+      const flushBuffer = (delimiter: boolean) => {
+        if (!buffer) return null;
+        const out = {
+          type: "chunk_display",
+          content: buffer,
+          delimiter,
+        };
+        buffer = "";
+        return out;
+      };
+
+      const handleStream = async function* (instance: AI): AsyncGenerator<{
+        type: string,
+        content: string,
+        delimiter: boolean
+      }> {
+        instance.logger.trace("CALL START")
+        let hasToolCalls = false;
+        const openaiMessages = buildMessagesForOpenAI(chatHistory);
+        instance.logger.trace(openaiMessages);
+        // Start streaming from the Responses API
+        // The official client exposes a streaming helper `client.responses.stream`.
+        // We pass `input` as the messages array.
+        const stream = await instance.openai.responses.create({
+          model: "qwen3.6-flash",
+          input: openaiMessages,
+          stream: true,
+          tools: instance.tools.map((t) => ({
+            type: "function",
+            name: t.name,
+            description: t.description,
+            parameters: z.toJSONSchema(t.schema as any, {
+              target: 'draft-7',
+            }),
+            strict: true
+          })),
+          tool_choice: "auto",
+          // You can pass additional options here (e.g., temperature) if desired
+          ...additionalOptions
+        });
+
+        for await (const event of stream) {
+          instance.logger.trace(event);
+          if (event.type == "response.output_item.done") {
+            if (event.item.type == "function_call") {
+              hasToolCalls = true;
+              let args;
+              try {
+                args = JSON.parse(event.item.arguments) || {}
+              }
+              catch {
+                args = `${event.item.arguments}`
+              }
+              chatHistory.push(
+                new AIMessage({
+                  content: "",
+                  tool_calls: [{
+                    type: "tool_call",
+                    id: event.item.call_id,
+                    name: event.item.name,
+                    args
+                  }],
+                })
+              );
+
+              console.dir(event.item)
+              console.log(`Called ${event.item.name}`)
+              const tool = toolMap[event.item.name];
+              let result: string;
+              try {
+                if (!tool) {
+                  result = `Error: Unknown tool "${event.item.name}"`;
+                } else {
+
+                  if (buffer) {
+                    yield {
+                      type: "chunk_display",
+                      content: buffer,
+                      delimiter: false,
+                    };
+                    buffer = "";
+                  }
+
+                  // parse args safely (if present)
+                  const args2 = JSON.parse(event.item.arguments) ?? {};
+                  console.trace(args2)
+                  result = await tool.invoke(args2);
+
+                }
+
+              }
+              catch (err: any) {
+                console.error(err);
+                result = `Tool execution error: ${err.message}`;
+              }
+              console.trace(result);
+
+              chatHistory.push(
+                new ToolMessage({
+                  content: result,
+                  tool_call_id: event.item.call_id,
+                })
+              )
+
+            }
+          }
+          else if (event.type == "response.output_text.delta") {
+            // 📡 NORMAL STREAMING (unchanged)
+            const chunkText = (event.delta || "") as string;
+            fullResponseContent += chunkText;
+            buffer += chunkText;
+
+            if (buffer.includes("\n\n")) {
+              let text = buffer.slice(0, buffer.indexOf("\n\n"));
+              buffer = buffer.slice(buffer.indexOf("\n\n") + 2);
+
+              yield {
+                type: "chunk_display",
+                content: text,
+                delimiter: true,
+              };
+            }
+          }
+        }
+
+        if (hasToolCalls) {
+          instance.logger.trace("RECALLING!!!")
+          yield* handleStream(instance);
+          return;
+        }
+
+      }
+
+      for await (const event of handleStream(this)) {
+        yield event;
+      }
+
+
+
+      // 🧩 Flush remaining buffer
+      if (buffer) {
+        yield {
+          type: "chunk_display",
+          content: buffer,
+          delimiter: false,
+        };
+      }
+
+      // Persist final AI response into chatHistory
+      chatHistory.push(new AIMessage(fullResponseContent));
+
+      // Return final chatHistory
+      yield {
+        type: "done",
+        content: chatHistory,
+        delimiter: false
+      };
+    } catch (error) {
+      console.error("\n🚨 Oops! Something went wrong (v2):", error);
+      // If we added the user's message at the top and want to revert it on error, pop it
+      if (userInput) {
+        // remove last message if it matches the user input
+        const last = chatHistory[chatHistory.length - 1];
+        if (last instanceof HumanMessage && last.content === userInput) {
+          chatHistory.pop();
+        }
+      }
+      throw error;
+    }
+  }
+
+
   async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string): Promise<string> {
     // 1. Read the System Prompt from the file
     const systemPromptPath = path.resolve("src/static/prompts/system.md");
@@ -709,7 +972,7 @@ export default class AI {
     };
     const messages = history.map(m => m.type == 'ai' ? `AI: ${m.content}` : m.content).join('\n\n');
     const model = new ChatOpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey: process.env.ALIBABA_API_KEY,
       model: 'qwen-flash',
       configuration: {
         baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
@@ -766,7 +1029,7 @@ Rules:
           }
 
           try {
-            const streamGenerator = this.processChat(chatHistory, userInput);
+            const streamGenerator = this.processChatv2(chatHistory, userInput);
 
             // 3. Consume the generator stream manually to control output
             for await (const yieldState of streamGenerator) {

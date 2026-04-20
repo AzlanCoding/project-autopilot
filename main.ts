@@ -5,7 +5,7 @@ import { SofiaBot } from './src/services/botService';
 import { createLogger } from './src/config/logger';
 import readline from 'readline';
 import getCalendarEvents from './src/utils/getCalendarEvents';
-import schedule from 'node-schedule';
+import { Cron } from "croner";
 
 
 const main = async () => {
@@ -20,7 +20,7 @@ const main = async () => {
   await db.ensureMilvusCollection();
 
   process.on('SIGINT', async () => {
-    await Promise.all([db.unloadMilvus(), schedule.gracefulShutdown()]);
+    await Promise.all([db.unloadMilvus()]);
     process.exit(0);
   });
 
@@ -28,7 +28,7 @@ const main = async () => {
 
   // Set up job to send daily message
   // '0 0 7 * * 1-5' means: At 07:00:00 on Monday through Friday
-  schedule.scheduleJob('0 0 7 * * 1-5', function () {
+  new Cron('0 0 7 * * 1-5', function () {
     (async () => {
       logger.info(`Daily Message Job executing`);
       const data = await ai.timetableTool.func({});
@@ -45,6 +45,7 @@ const main = async () => {
       logger.error(error, 'Error executing daily message scheduled job');
     })
   });
+
 
   const bot = new SofiaBot(logger, ai, db);
   await bot.connect();

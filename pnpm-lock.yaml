@@ -27,6 +27,9 @@ importers:
       '@langchain/core':
         specifier: ^1.1.40
         version: 1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4)
+      '@langchain/ollama':
+        specifier: ^1.2.6
+        version: 1.2.6(@langchain/core@1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4))
       '@langchain/openai':
         specifier: ^1.4.4
         version: 1.4.4(@langchain/core@1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4))(ws@5.2.4)
@@ -42,6 +45,9 @@ importers:
       baileys-bottle-devstroupe:
         specifier: ^2.3.66
         version: 2.3.66(pg@8.18.0)(sharp@0.34.5)(ts-node@10.9.2(@types/node@25.3.0)(typescript@5.9.3))
+      croner:
+        specifier: ^10.0.1
+        version: 10.0.1
       dotenv:
         specifier: ^17.3.1
         version: 17.3.1
@@ -57,9 +63,6 @@ importers:
       moment-timezone:
         specifier: ^0.6.1
         version: 0.6.1
-      node-schedule:
-        specifier: ^2.1.1
-        version: 2.1.1
       openai:
         specifier: ^6.34.0
         version: 6.34.0(ws@5.2.4)(zod@4.3.6)
@@ -524,6 +527,12 @@ packages:
     peerDependenciesMeta:
       zod-to-json-schema:
         optional: true
+
+  '@langchain/ollama@1.2.6':
+    resolution: {integrity: sha512-wEfjRjyB20SMduqjriIBEalXZf1twbfaNTxxLIjKCVrufHPtKJKGy1a0tQHqa+27HwektNNXlcMre7MTuaS5Rw==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@langchain/core': ^1.0.0
 
   '@langchain/openai@1.4.4':
     resolution: {integrity: sha512-mRr/X5rvlwPj6cSXPxbL+CtOqYANO1/+CQ3Z+5t48kWnrlgPYOazmA+UAWvqQOuwJ6LaYn3SFrt43rR4lte/Ow==}
@@ -1108,9 +1117,9 @@ packages:
   create-require@1.1.1:
     resolution: {integrity: sha512-dcKFX3jn0MpIaXjisoRvexIJVEKzaq7z2rZKxf+MSr9TkdmHmsU4m2lcLojrj/FHl8mk5VxMmYA+ftRkP/3oKQ==}
 
-  cron-parser@4.9.0:
-    resolution: {integrity: sha512-p0SaNjrHOnQeR8/VnfGbmg9te2kfyYSQ7Sc/j/6DtPL3JQvKxmjO9TSjNFpujqV3vEYYBvNNvXSxzyksBWAx1Q==}
-    engines: {node: '>=12.0.0'}
+  croner@10.0.1:
+    resolution: {integrity: sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g==}
+    engines: {node: '>=18.0'}
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
@@ -1527,9 +1536,6 @@ packages:
     resolution: {integrity: sha512-TFYA4jnP7PVbmlBIfhlSe+WKxs9dklXMTEGcBCIvLhE/Tn3H6Gk1norupVW7m5Cnd4bLcr08AytbyV/xj7f/kQ==}
     engines: {node: '>= 12.0.0'}
 
-  long-timeout@0.1.1:
-    resolution: {integrity: sha512-BFRuQUqc7x2NWxfJBCyUrN8iYUYznzL9JROmRz1gZ6KlOIgmoD+njPVbb+VNn2nGMKggMsK79iUNErillsrx7w==}
-
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
 
@@ -1543,10 +1549,6 @@ packages:
   lru-cache@9.1.2:
     resolution: {integrity: sha512-ERJq3FOzJTxBbFjZ7iDs+NiK4VI9Wz+RdrrAB8dio1oV+YvdPzUEE4QNiT2VD51DkIbCYRUUzCRkssXCHqSnKQ==}
     engines: {node: 14 || >=16.14}
-
-  luxon@3.7.2:
-    resolution: {integrity: sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew==}
-    engines: {node: '>=12'}
 
   make-error@1.3.6:
     resolution: {integrity: sha512-s8UhlNe7vPKomQhC1qFelMokr/Sc3AgNbso3n74mVPA5LTZwkB9NlXf4XPamLxJE8h0gh73rM94xvwRT2CVInw==}
@@ -1625,13 +1627,12 @@ packages:
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
 
-  node-schedule@2.1.1:
-    resolution: {integrity: sha512-OXdegQq03OmXEjt2hZP33W2YPs/E5BcFQks46+G2gAxs4gHOIVD1u7EqlYLYSKsaIpyKCK9Gbk0ta1/gjRSMRQ==}
-    engines: {node: '>=6'}
-
   object-inspect@1.13.4:
     resolution: {integrity: sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==}
     engines: {node: '>= 0.4'}
+
+  ollama@0.6.3:
+    resolution: {integrity: sha512-KEWEhIqE5wtfzEIZbDCLH51VFZ6Z3ZSa6sIOg/E/tBV8S51flyqBOXi+bRxlOYKDf8i327zG9eSTb8IJxvm3Zg==}
 
   on-exit-leak-free@2.1.2:
     resolution: {integrity: sha512-0eJJY6hXLGf1udHwfNftBqH+g73EU4B504nZeKpz1sYRKafAghwxEJunB2O7rDZkL4PGfsMVnTXZ2EjibbqcsA==}
@@ -1972,9 +1973,6 @@ packages:
   sonic-boom@4.2.1:
     resolution: {integrity: sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==}
 
-  sorted-array-functions@1.3.0:
-    resolution: {integrity: sha512-2sqgzeFlid6N4Z2fUQ1cvFmTOLRi/sEDzSQ0OKYchqgoPmQBVyM3959qYx3fpS6Esef80KjmpgPeEr028dP3OA==}
-
   split2@4.2.0:
     resolution: {integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==}
     engines: {node: '>= 10.x'}
@@ -2194,6 +2192,9 @@ packages:
   web-streams-polyfill@3.3.3:
     resolution: {integrity: sha512-d2JWLCivmZYTSIoge9MsgFCZrt571BikcWGYkjC1khllbTeDlGqZ2D8vD8E/lJa8WGWbb7Plm8/XJYV7IJHZZw==}
     engines: {node: '>= 8'}
+
+  whatwg-fetch@3.6.20:
+    resolution: {integrity: sha512-EqhiFU6daOA8kpjOWTL0olhVOF3i7OrFzSYiGsEMB8GcXS+RrzauAERX65xMeNWVqxA6HXH2m69Z9LaKKdisfg==}
 
   which-typed-array@1.1.20:
     resolution: {integrity: sha512-LYfpUkmqwl0h9A2HL09Mms427Q1RZWuOHsukfVcKRq9q95iQxdw0ix1JQrqbcDR9PH1QDwf5Qo8OZb5lksZ8Xg==}
@@ -2998,6 +2999,12 @@ snapshots:
       - svelte
       - vue
 
+  '@langchain/ollama@1.2.6(@langchain/core@1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4))':
+    dependencies:
+      '@langchain/core': 1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4)
+      ollama: 0.6.3
+      uuid: 10.0.0
+
   '@langchain/openai@1.4.4(@langchain/core@1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4))(ws@5.2.4)':
     dependencies:
       '@langchain/core': 1.1.40(@opentelemetry/api@1.9.1)(openai@6.34.0(ws@5.2.4)(zod@4.3.6))(ws@5.2.4)
@@ -3743,9 +3750,7 @@ snapshots:
   create-require@1.1.1:
     optional: true
 
-  cron-parser@4.9.0:
-    dependencies:
-      luxon: 3.7.2
+  croner@10.0.1: {}
 
   cross-spawn@7.0.6:
     dependencies:
@@ -4181,8 +4186,6 @@ snapshots:
       safe-stable-stringify: 2.5.0
       triple-beam: 1.4.1
 
-  long-timeout@0.1.1: {}
-
   long@5.3.2: {}
 
   lru-cache@10.4.3: {}
@@ -4190,8 +4193,6 @@ snapshots:
   lru-cache@11.2.6: {}
 
   lru-cache@9.1.2: {}
-
-  luxon@3.7.2: {}
 
   make-error@1.3.6:
     optional: true
@@ -4263,13 +4264,11 @@ snapshots:
 
   node-int64@0.4.0: {}
 
-  node-schedule@2.1.1:
-    dependencies:
-      cron-parser: 4.9.0
-      long-timeout: 0.1.1
-      sorted-array-functions: 1.3.0
-
   object-inspect@1.13.4: {}
+
+  ollama@0.6.3:
+    dependencies:
+      whatwg-fetch: 3.6.20
 
   on-exit-leak-free@2.1.2: {}
 
@@ -4664,8 +4663,6 @@ snapshots:
     dependencies:
       atomic-sleep: 1.0.0
 
-  sorted-array-functions@1.3.0: {}
-
   split2@4.2.0: {}
 
   sql-highlight@6.1.0: {}
@@ -4840,6 +4837,8 @@ snapshots:
   vary@1.1.2: {}
 
   web-streams-polyfill@3.3.3: {}
+
+  whatwg-fetch@3.6.20: {}
 
   which-typed-array@1.1.20:
     dependencies:

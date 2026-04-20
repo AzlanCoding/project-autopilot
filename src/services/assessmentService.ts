@@ -1,11 +1,11 @@
 // Originally Written by Bing Chat, Modified by AzlanCoding 
 import { Sequelize, ModelStatic, InferCreationAttributes, InferAttributes } from 'sequelize';
 import { Assessment } from '../models/Assessment';
-import { scheduleJob, cancelJob, Job } from 'node-schedule';
 import { formatDateTime, getTime } from '../utils/common';
 import type Store from './store';
 import { type Logger } from 'pino';
 import moment from 'moment-timezone';
+import { Cron } from "croner";
 
 type AssessmentCreateInput = Omit<InferCreationAttributes<Assessment>, 'id'>;
 type AssessmentAttributes = InferAttributes<Assessment>;
@@ -15,7 +15,7 @@ export class AssessmentService {
   private db: Sequelize;
   private logger: Logger;
   private Model: ModelStatic<Assessment>;
-  private job_mappings: { [index: number]: Job[] } = {};
+  private job_mappings: { [index: number]: Cron[] } = {};
 
   constructor(store: Store, logger: Logger) {
     this.store = store
@@ -33,7 +33,7 @@ export class AssessmentService {
       return () => {
         (async () => {
           this.logger.info(`Assignment Reminder Message Job executing`);
-          await this.store.ai_scheduled_task_runner!(async () => `Please send a reminder to the "${assessment.subject}" group chat to remind students that the assessment "${assessment.title}" is in ${coming_in}. It will be held on ${formatDateTime(assessment.date)}. Include the following assessment description below.\n\n Assessment Description:\n${assessment.description}\n\nYou might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID.`)
+          await this.store.ai_scheduled_task_runner!(async () => `Please send a reminder to the "${assessment.subject}" group chat to remind students that the assessment "${assessment.title}" is in ${coming_in}. It will be held on ${formatDateTime(Number(assessment.date))}. Include the following assessment description below.\n\n Assessment Description:\n${assessment.description}\n\nYou might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID.`)
           this.logger.info(`Assignment Reminder Message Job Finished executed`);
         })().catch(error => {
           this.logger.error(error, 'Error executing Assignment Reminder Message Job');
@@ -42,16 +42,16 @@ export class AssessmentService {
     };
 
     this.job_mappings[assessment.id] = [
-      scheduleJob(new Date(assessment.date), () => this.destroy(assessment.id)),
+      new Cron(new Date(Number(assessment.date)).toISOString(), () => this.destroy(assessment.id)),
       ...([
-        moment(assessment.date).add(-3, 'weeks') > moment() ? scheduleJob(moment(assessment.date).add(-3, 'weeks').toDate(), generateJob("3 weeks")) : null,
-        moment(assessment.date).add(-2, 'weeks') > moment() ? scheduleJob(moment(assessment.date).add(-2, 'weeks').toDate(), generateJob("2 weeks")) : null,
-        moment(assessment.date).add(-1, 'week') > moment() ? scheduleJob(moment(assessment.date).add(-1, 'week').toDate(), generateJob("1 week")) : null,
-        moment(assessment.date).add(-3, 'days') > moment() ? scheduleJob(moment(assessment.date).add(-3, 'days').toDate(), generateJob("3 days")) : null,
-        moment(assessment.date).add(-2, 'days') > moment() ? scheduleJob(moment(assessment.date).add(-2, 'days').toDate(), generateJob("2 days")) : null,
-        moment(assessment.date).add(-1, 'day') > moment() ? scheduleJob(moment(assessment.date).add(-1, 'day').toDate(), generateJob("1 day (tomorrow)")) : null,
-        moment(assessment.date).add(-12, 'hours') > moment() ? scheduleJob(moment(assessment.date).add(-12, 'hours').toDate(), generateJob("12 Hours")) : null,
-        moment(assessment.date).add(-3, 'hours') > moment() ? scheduleJob(moment(assessment.date).add(-3, 'hours').toDate(), generateJob("3 Hours")) : null
+        moment(Number(assessment.date)).add(-3, 'weeks') > moment() ? new Cron(moment(Number(assessment.date)).add(-3, 'weeks').toDate().toISOString(), generateJob("3 weeks")) : null,
+        moment(Number(assessment.date)).add(-2, 'weeks') > moment() ? new Cron(moment(Number(assessment.date)).add(-2, 'weeks').toDate().toISOString(), generateJob("2 weeks")) : null,
+        moment(Number(assessment.date)).add(-1, 'week') > moment() ? new Cron(moment(Number(assessment.date)).add(-1, 'week').toDate().toISOString(), generateJob("1 week")) : null,
+        moment(Number(assessment.date)).add(-3, 'days') > moment() ? new Cron(moment(Number(assessment.date)).add(-3, 'days').toDate().toISOString(), generateJob("3 days")) : null,
+        moment(Number(assessment.date)).add(-2, 'days') > moment() ? new Cron(moment(Number(assessment.date)).add(-2, 'days').toDate().toISOString(), generateJob("2 days")) : null,
+        moment(Number(assessment.date)).add(-1, 'day') > moment() ? new Cron(moment(Number(assessment.date)).add(-1, 'day').toDate().toISOString(), generateJob("1 day (tomorrow)")) : null,
+        moment(Number(assessment.date)).add(-12, 'hours') > moment() ? new Cron(moment(Number(assessment.date)).add(-12, 'hours').toDate().toISOString(), generateJob("12 Hours")) : null,
+        moment(Number(assessment.date)).add(-3, 'hours') > moment() ? new Cron(moment(Number(assessment.date)).add(-3, 'hours').toDate().toISOString(), generateJob("3 Hours")) : null
       ].filter(j => j != null)),
     ];
   }
@@ -59,7 +59,7 @@ export class AssessmentService {
   private cancelAssessmentJobs(assessment_id: number) {
     if (this.job_mappings[assessment_id]) {
       this.job_mappings[assessment_id].forEach(job => {
-        cancelJob(job)
+        job.stop();
       });
       delete this.job_mappings[assessment_id];
     }
@@ -69,7 +69,7 @@ export class AssessmentService {
     const now = getTime();
     const assessments = await this.findAll();
     await Promise.all(assessments.map(async (assessment) => {
-      if (now < assessment.date) {
+      if (now < Number(assessment.date)) {
         this.generateAssessmentJobs(assessment);
       }
       else {
