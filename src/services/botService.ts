@@ -239,9 +239,8 @@ export class SofiaBot {
                         // await this.sock!.sendMessage(msg.key.remoteJid!, { text: "PROCESS DEBUG" })
 
                         const chatHistoryParsed = (await this.db.user.formatAndMergeMessages(chatHistory)).slice(-7);// Limit to 7 messages
-                        console.dir(chatHistoryParsed);
                         this.logger.trace(chatHistoryParsed);
-                        if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.includes('@Sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
+                        if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.toLowerCase().includes('sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
                           await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
                           this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
                           return;
