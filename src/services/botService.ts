@@ -258,7 +258,7 @@ export class SofiaBot {
                             this.logger.error(`Unknown user with jid ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
                             return;
                           }
-                          systemPrompt = await this.ai.generatePrompt('chat', current_user?.name, current_user?.id)
+                          systemPrompt = await this.ai.generatePrompt('chat', current_user?.name, current_user?.id, current_user?.description)
                         }
                         else {
                           await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);

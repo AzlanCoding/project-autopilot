@@ -948,14 +948,14 @@ export default class AI {
   }
 
 
-  async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string): Promise<string> {
+  async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string): Promise<string> {
     // 1. Read the System Prompt from the file
     const systemPromptPath = path.resolve("src/static/prompts/system.md");
     const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
 
     // 2. Get memory for a current user id
     const memories = mode == 'group' ? '' : await this.memoryQueryByUserTool.func({ userId: current_user_id }) as string;
-    const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `Below are your memories related to the current user, ${current_user_name} with user ID ${current_user_id}.
+    const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
     User Memories: ${JSON.stringify(JSON.parse(memories).data)}
     If you have no memory of saying hi to this user for the first time, please use the \`memory_write\` tool call to save this event (leave category empty) and then introduce yourself to the user.`}
     Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (GIFs and Stickers unavaliable in this mode)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
