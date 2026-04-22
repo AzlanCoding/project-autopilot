@@ -90,7 +90,10 @@ export default class Store {
       apiKey: process.env.ALIBABA_API_KEY,
       modelName: 'text-embedding-v4',
       dimensions: 2048,
-      configuration: { baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" }
+      configuration: {
+        // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      }
     });
     return await embeddings.embedQuery(text);
   }

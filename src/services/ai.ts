@@ -28,7 +28,8 @@ export default class AI {
   openai = new OpenAI(
     {
       apiKey: process.env.ALIBABA_API_KEY,
-      baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
   );
 
@@ -510,7 +511,8 @@ export default class AI {
         // model: 'gpt-4o-mini',
         model: 'qwen3.6-flash',
         configuration: {
-          baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+          // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+          baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
         }
       }).bindTools(this.tools)
       // this.model = new ChatOllama({
@@ -529,6 +531,7 @@ export default class AI {
       const systemPromptPath = path.resolve("src/static/prompts/system.md");
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavaliable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
+      Avaliable Tool Calls: ${this.tools.map(t => t.name).join(', ')}
       IMPORTANT: This chat is triggered automatically by the system due to a scheduled task. SEND YOUR REPLY USING THE send_message TOOL CALL ONLY! ONLY 1 USER MESSAGE WILL BE SENT! FOLLOW THE USER INSTRUCTIONS IMMEDIATELY! DO NOT ASK FOR CONFIRMATION!
       GROUP CHATS: ${await this.listGroupsTool!.func({})}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
@@ -975,18 +978,22 @@ export default class AI {
       apiKey: process.env.ALIBABA_API_KEY,
       model: 'qwen-flash',
       configuration: {
-        baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
       }
     }).withStructuredOutput(z.object({
       shouldRespond: z.boolean().describe("Whether or not the AI model Sofia should reply or not.")
     }))
     const systemMsg = `You determine whether an AI named Sofia should respond.
 Rules:
-- Respond ONLY if the latest message is clearly directed at Sofia.
-- Indicators include:
-  - mentioning "Sofia" or "@Sofia"
-  - asking a question to her
-  - replying directly to her previous message
+- Respond ONLY if the latest message is asking a question to her. If not do not respond.
+Examples when you should respond:
+- "Sofia, what is the timetable for tomorrow."
+- "Sofia can you play a game with me?"
+Examples when you should not respond:
+- "Sofia will be able to send GIFs and Stickers."
+- "I've added a new feature to sofia."
+- "I've just fixed some bugs with sofia."
 `
     const userMsg = `This is the current Chat History:\n${messages}\nShould AI model Sofia reply?`
     const output = await model.invoke([new SystemMessage(systemMsg), new HumanMessage(userMsg)]);

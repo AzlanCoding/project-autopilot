@@ -10,7 +10,7 @@ export class BufferSystem {
       timeout?: NodeJS.Timeout
       func: () => Promise<void>
       lastUpdate: number;
-    }
+    } | undefined
   } = {}
 
   constructor(logger: Logger) {
@@ -24,6 +24,9 @@ export class BufferSystem {
         clearTimeout(this.chatBuffers[id].timeout);
         this.chatBuffers[id].timeout = setTimeout(() => {
           this.logger.info("Buffer running for " + id);
+          if (!this.chatBuffers[id]) {
+            return;
+          }
           this.chatBuffers[id].status = 'RUNNING';
           this.chatBuffers[id].lastUpdate = getTime();
           func().finally(() => {
@@ -45,6 +48,9 @@ export class BufferSystem {
       this.chatBuffers[id] = {
         status: 'WAITING',
         timeout: setTimeout(() => {
+          if (!this.chatBuffers[id]) {
+            return;
+          }
           this.logger.info("Buffer running for " + id);
           this.chatBuffers[id].status = 'RUNNING';
           this.chatBuffers[id].lastUpdate = getTime();
@@ -63,12 +69,18 @@ export class BufferSystem {
   }
 
   pauseBuffer(id: string) {
+    if (!this.chatBuffers[id]) {
+      return;
+    }
     this.logger.info("Buffer paused for " + id);
     clearTimeout(this.chatBuffers[id].timeout);
     this.chatBuffers[id].lastUpdate = getTime();
   }
 
   resumeBuffer(id: string) {
+    if (!this.chatBuffers[id]) {
+      return;
+    }
     this.logger.info("Buffer resumed for " + id);
     if (this.chatBuffers[id].timeout) {
       clearTimeout(this.chatBuffers[id].timeout);
@@ -76,6 +88,9 @@ export class BufferSystem {
     this.chatBuffers[id].status = 'WAITING'
     this.chatBuffers[id].timeout = setTimeout(() => {
       this.logger.info("Buffer running for " + id);
+      if (!this.chatBuffers[id]) {
+        return;
+      }
       this.chatBuffers[id].status = 'RUNNING';
       this.chatBuffers[id].lastUpdate = getTime();
       this.chatBuffers[id].func().finally(() => {
