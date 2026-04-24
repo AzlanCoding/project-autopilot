@@ -372,7 +372,7 @@ export class SofiaBot {
 
     let messages = await this.store.messages.all(remoteJidAlt || remoteJid)
     if (remoteJidAlt) {
-      messages = [...messages, ...(await this.store.messages.all(remoteJid))]
+      messages = [...messages, ...((await this.store.messages.all(remoteJid)) || [])]
     }
     const parseMentions = async (m: WAMessage | proto.IMessage, text?: string | null) => {
       if (!text) {

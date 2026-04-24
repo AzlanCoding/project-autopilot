@@ -736,7 +736,7 @@ export default class AI {
       console.log("\n🤖 Thinking (v2 with official OpenAI client)...");
 
       // Query memory and add a system hint if relevant
-      const memory = await this.memoryQueryTool.func({ queryText: userInput });
+      const memory = await this.memoryQueryTool.func({ queryText: userInput || chatHistory.filter(m => m instanceof HumanMessage).slice(-1)[0].content });
       if (Array.isArray(memory) && memory.length > 0) {
         chatHistory.push(new SystemMessage(`Possibly relevant memory data: ${memory}`));
       }
