@@ -986,10 +986,12 @@ export default class AI {
     }))
     const systemMsg = `You determine whether an AI named Sofia should respond.
 Rules:
-- Respond ONLY if the latest message is asking a question to her. If not do not respond.
+- Respond ONLY if the latest message is asking a question to her or asking her to do something. If not do not respond.
 Examples when you should respond:
 - "Sofia, what is the timetable for tomorrow."
 - "Sofia can you play a game with me?"
+- "Sofia create a new assignment with the information above."
+- "Sofia, can you help me check what assessments we have soon?" 
 Examples when you should not respond:
 - "Sofia will be able to send GIFs and Stickers."
 - "I've added a new feature to sofia."

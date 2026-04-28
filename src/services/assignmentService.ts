@@ -33,7 +33,7 @@ export class AssignmentService {
       return () => {
         (async () => {
           this.logger.info(`Assessment Reminder Message Job executing`);
-          await this.store.ai_scheduled_task_runner!(async () => `Please send a reminder to the "${assignment.subject}" group chat to remind students that the assignment "${assignment.title}" is due in ${coming_in}. It will be due on ${formatDateTime(Number(assignment.dueDate))}. Include the following assignment description below.\n\n Assignment Description:\n${assignment.description}\n\nYou might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID.`)
+          await this.store.ai_scheduled_task_runner!(async () => `Please send a reminder to the "${assignment.subject}" group chat to remind students that the assignment "${assignment.title}" is due in ${coming_in}. It will be due on ${formatDateTime(Number(assignment.dueDate))}. Include the following assignment description below.\n\n Assignment Description:\n${assignment.description}\n\nYou might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class.`)
           this.logger.info(`Assessment Reminder Message Job Finished executed`);
         })().catch(error => {
           this.logger.error(error, 'Error executing Assessment Reminder Message Job');

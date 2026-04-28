@@ -37,7 +37,7 @@ const main = async () => {
         return;
       }
       await db.ai_scheduled_task_runner!(
-        async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID.`
+        async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class.`
       );
 
       logger.info(`Daily Message Job Finished executed`);
