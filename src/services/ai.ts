@@ -427,7 +427,7 @@ export default class AI {
       func: async (args) => {
         try {
           const rows = await this.db.user.findAll();
-          const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: User) => ({ id: r.id, name: r.name }));
+          const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: User) => ({ id: r.id, name: r.name, description: r.description }));
           return JSON.stringify(out);
         } catch (err: any) {
           return `Tool execution error: ${err?.message ?? String(err)}`;
@@ -509,7 +509,7 @@ export default class AI {
       this.model = new ChatOpenAI({
         apiKey: process.env.ALIBABA_API_KEY,
         // model: 'gpt-4o-mini',
-        model: 'qwen3.6-flash',
+        model: 'qwen3.5-35b-a3b',
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
           baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -803,7 +803,7 @@ export default class AI {
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
         const stream = await instance.openai.responses.create({
-          model: "qwen3.6-flash",
+          model: "qwen3.5-35b-a3b",
           input: openaiMessages,
           stream: true,
           tools: instance.tools.map((t) => ({
