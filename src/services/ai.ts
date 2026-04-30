@@ -509,7 +509,7 @@ export default class AI {
       this.model = new ChatOpenAI({
         apiKey: process.env.ALIBABA_API_KEY,
         // model: 'gpt-4o-mini',
-        model: 'qwen3.5-35b-a3b',
+        model: 'qwen3.5-plus',
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
           baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -803,7 +803,7 @@ export default class AI {
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
         const stream = await instance.openai.responses.create({
-          model: "qwen3.5-35b-a3b",
+          model: "qwen3.5-plus",
           input: openaiMessages,
           stream: true,
           tools: instance.tools.map((t) => ({
