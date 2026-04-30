@@ -9,7 +9,8 @@ import StoreHandle from "baileys-bottle-devstroupe/lib/bottle/StoreHandle";
 import { BufferSystem } from './bufferSystem';
 import type Store from "./store";
 import type AI from "./ai";
-import { DynamicStructuredTool, SystemMessage } from 'langchain';
+import { ExtendedDynamicStructuredTool } from "./ai";
+import { SystemMessage } from 'langchain';
 import z from "zod";
 
 
@@ -39,76 +40,67 @@ export class SofiaBot {
     this.bufferSystem = new BufferSystem(loggerInstance);
     this.ai = ai;
     this.db = db;
-    this.ai.sendMessageTool = new DynamicStructuredTool({
+    this.ai.sendMessageTool = new ExtendedDynamicStructuredTool({
       name: "send_message",
       description: "Send a message to a chat or a group chat based on a user id or group id (ending with `@g.us`).",
       schema: z.object({
-        id: z.string().describe("[Required] The user id or group id to send the chat to. E.g,`467793d9-6b60-45e7-9fbc-a202ef40837f` or `12345678@g.us` ."),
+        id: z.string().describe("[Required] The user id or group id to send the chat to. E.g,`467793d9-6b60-45e7-9fbc-a202ef40837f` or `12345678@g.us`"),
         text: z.string().min(1).describe("The message to send."),
       }),
       func: async (args) => {
-        try {
-          const { id, text } = args;
-          if (id.endsWith('@g.us')) {
-            const replyMsg: WAMessage = {
-              message: {
-                conversation: `I am an AI Agent`
-              },
-              key: {
-                id: 'autoCmd' + Math.floor(process.uptime()),
-                remoteJid: id,
-                fromMe: false,
-                participant: this.sock!.user?.lid,
-              },
-              messageTimestamp: Math.floor((new Date()).getTime() / 1000),
-              pushName: 'Sofia',
-              broadcast: false,
-            };
-            await this.sock?.sendMessage(id, { text }, { quoted: replyMsg });
-          }
-          else {
-            const user = await this.db.user.findById(id);
-            if (!user) {
-              throw Error(`Unknown user with id ${id}`)
-            }
-            const replyMsg: WAMessage = {
-              message: {
-                conversation: `I am an AI Agent`
-              },
-              key: {
-                id: 'autoCmd' + Math.floor(process.uptime()),
-                remoteJid: '120364402285813629@g.us', // Random Group ID, probably invalid
-                fromMe: false,
-                participant: this.sock!.user?.lid,
-              },
-              messageTimestamp: Math.floor((new Date()).getTime() / 1000),
-              pushName: 'Sofia',
-              broadcast: false,
-            };
-            await this.sock?.sendMessage(user.whatsapp_jid, { text }, { quoted: replyMsg });
-          }
-          return "Success!";
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs: {id: string, text: string}`;
+        const { id, text } = args as any;
+        if (id.endsWith('@g.us')) {
+          const replyMsg: WAMessage = {
+            message: {
+              conversation: `I am an AI Agent`
+            },
+            key: {
+              id: 'autoCmd' + Math.floor(process.uptime()),
+              remoteJid: id,
+              fromMe: false,
+              participant: this.sock!.user?.lid,
+            },
+            messageTimestamp: Math.floor((new Date()).getTime() / 1000),
+            pushName: 'Sofia',
+            broadcast: false,
+          };
+          await this.sock?.sendMessage(id, { text }, { quoted: replyMsg });
         }
+        else {
+          const user = await this.db.user.findById(id);
+          if (!user) {
+            throw Error(`Unknown user with id ${id}`)
+          }
+          const replyMsg: WAMessage = {
+            message: {
+              conversation: `I am an AI Agent`
+            },
+            key: {
+              id: 'autoCmd' + Math.floor(process.uptime()),
+              remoteJid: '120364402285813629@g.us', // Random Group ID, probably invalid
+              fromMe: false,
+              participant: this.sock!.user?.lid,
+            },
+            messageTimestamp: Math.floor((new Date()).getTime() / 1000),
+            pushName: 'Sofia',
+            broadcast: false,
+          };
+          await this.sock?.sendMessage(user.whatsapp_jid, { text }, { quoted: replyMsg });
+        }
+        return "Message Sent";
       }
-    })
+    }, "{id: string, text: string}")
     this.ai.tools.push(this.ai.sendMessageTool);
-    this.ai.listGroupsTool = new DynamicStructuredTool({
+    this.ai.listGroupsTool = new ExtendedDynamicStructuredTool({
       name: 'list_groups',
       description: 'List all of the group chats that you have access to.',
       schema: z.object({}),
       func: async (args) => {
-        try {
-          return JSON.stringify(Object.values(await this.sock!.groupFetchAllParticipating()).map(g => ({
-            id: g.id, name: g.subject//, description: g.desc 
-          })));
-        }
-        catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}`;
-        }
+        return JSON.stringify(Object.values(await this.sock!.groupFetchAllParticipating()).map(g => ({
+          id: g.id, name: g.subject//, description: g.desc 
+        })));
       }
-    });
+    }, "{}");
     this.ai.tools.push(this.ai.listGroupsTool);
 
     this.ai.bindModel();

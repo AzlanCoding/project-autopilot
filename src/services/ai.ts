@@ -20,6 +20,14 @@ import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses.js';
 
+export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
+  usage_str: string
+  constructor(fields: ConstructorParameters<typeof DynamicStructuredTool>[0], usage_str: string) {
+    super(fields as any);
+    this.usage_str = usage_str;
+  }
+}
+
 export default class AI {
   ai_user_id: string = "ea502c0f-7fe6-4f7c-9d63-80dd7b0de90e";
   test_mode: boolean = false;
@@ -35,41 +43,41 @@ export default class AI {
 
 
   // Tools will be initialized in constructor so they can reference this.db
-  getCurrentTimeTool: DynamicStructuredTool;
-  memoryWriteTool: DynamicStructuredTool;
-  memoryQueryTool: DynamicStructuredTool;
-  memoryQueryByUserTool: DynamicStructuredTool;
-  memoryDeleteTool: DynamicStructuredTool;
+  getCurrentTimeTool: ExtendedDynamicStructuredTool;
+  memoryWriteTool: ExtendedDynamicStructuredTool;
+  memoryQueryTool: ExtendedDynamicStructuredTool;
+  memoryQueryByUserTool: ExtendedDynamicStructuredTool;
+  memoryDeleteTool: ExtendedDynamicStructuredTool;
 
   // Assignment tools
-  assignmentCreateTool: DynamicStructuredTool;
-  // assignmentGetTool: DynamicStructuredTool;
-  assignmentListTool: DynamicStructuredTool;
-  assignmentUpdateTool: DynamicStructuredTool;
-  assignmentDeleteTool: DynamicStructuredTool;
+  assignmentCreateTool: ExtendedDynamicStructuredTool;
+  // assignmentGetTool: ExtendedDynamicStructuredTool;
+  assignmentListTool: ExtendedDynamicStructuredTool;
+  assignmentUpdateTool: ExtendedDynamicStructuredTool;
+  assignmentDeleteTool: ExtendedDynamicStructuredTool;
 
   // Assessment tools
-  assessmentCreateTool: DynamicStructuredTool;
-  // assessmentGetTool: DynamicStructuredTool;
-  assessmentListTool: DynamicStructuredTool;
-  assessmentUpdateTool: DynamicStructuredTool;
-  assessmentDeleteTool: DynamicStructuredTool;
+  assessmentCreateTool: ExtendedDynamicStructuredTool;
+  // assessmentGetTool: ExtendedDynamicStructuredTool;
+  assessmentListTool: ExtendedDynamicStructuredTool;
+  assessmentUpdateTool: ExtendedDynamicStructuredTool;
+  assessmentDeleteTool: ExtendedDynamicStructuredTool;
 
   // User Tools
-  userListTool: DynamicStructuredTool;
+  userListTool: ExtendedDynamicStructuredTool;
 
   // Timetable Tool
-  timetableTool: DynamicStructuredTool;
+  timetableTool: ExtendedDynamicStructuredTool;
 
   // Sticker & GIFs Tools
-  stickerGifTool: DynamicStructuredTool;
-  sendStickerGifTool: DynamicStructuredTool;
+  stickerGifTool: ExtendedDynamicStructuredTool;
+  sendStickerGifTool: ExtendedDynamicStructuredTool;
 
   // WhatsApp Specific Tools will be added later on runtime
-  sendMessageTool?: DynamicStructuredTool;
-  listGroupsTool?: DynamicStructuredTool;
+  sendMessageTool?: ExtendedDynamicStructuredTool;
+  listGroupsTool?: ExtendedDynamicStructuredTool;
 
-  tools: DynamicStructuredTool[];
+  tools: ExtendedDynamicStructuredTool[];
 
   // Model will be created after tools are defined
   bindModel: () => void;
@@ -79,17 +87,17 @@ export default class AI {
     this.db = db;
     this.logger = logger;
     // Simple current time tool
-    this.getCurrentTimeTool = new DynamicStructuredTool({
+    this.getCurrentTimeTool = new ExtendedDynamicStructuredTool({
       name: "get_current_time",
       description: "Get the current date and time",
       schema: z.object({}),
       func: async () => {
         return formatDateTime(new Date());
       }
-    });
+    }, "{}");
 
     // memory_write tool: calls store.memoryWrite
-    this.memoryWriteTool = new DynamicStructuredTool({
+    this.memoryWriteTool = new ExtendedDynamicStructuredTool({
       name: "memory_write",
       description: "Store a durable memory in the database with optional dedupe strategy",
       schema: z.object({
@@ -103,22 +111,17 @@ export default class AI {
         dedupeStrategy: z.enum(['supersede', 'overwrite', 'merge', 'keep_both']).optional().describe("The strategy to use if a similar memory already exists.")
       }),
       func: async (args) => {
-        try {
-          if (this.test_mode) {
-            throw Error("Disabled due to test mode.");
-          }
-          const res = await this.db.memoryWrite(args as any);
-          // memoryWrite returns a human-friendly string already
-          return String(res);
-        } catch (err: any) {
-          console.error(err);
-          return `Tool execution error: ${err?.message ?? String(err)}\nTool Args: {text: string, authorUserId?: string, subjectUserId?: string, groupId?: string, isGlobal?: boolean, category?: string, dedupeStrategy?: 'supersede'|'overwrite'|'merge'|'keep_both'}`;
+        if (this.test_mode) {
+          throw Error("Disabled due to test mode.");
         }
+        const res = await this.db.memoryWrite(args as any);
+        // memoryWrite returns a human-friendly string already
+        return String(res);
       }
-    });
+    }, "{text: string, authorUserId?: string, subjectUserId?: string, groupId?: string, isGlobal?: boolean, category?: string, dedupeStrategy?: 'supersede'|'overwrite'|'merge'|'keep_both'}");
 
     // memory_query tool: calls store.memoryQuery
-    this.memoryQueryTool = new DynamicStructuredTool({
+    this.memoryQueryTool = new ExtendedDynamicStructuredTool({
       name: "memory_query",
       description: "Query memories by text.",
       schema: z.object({
@@ -130,18 +133,14 @@ export default class AI {
         topK: z.number().optional().describe("The maximum number of top memories to return.")
       }),
       func: async (args) => {
-        try {
-          const res = await this.db.memoryQuery(args as any);
-          // Return JSON string so the model receives structured data in the tool response
-          return JSON.stringify(res);
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs: {queryText: string, groupId?: string, subjectUserId?: string, includeGlobal?: boolean, topK?: number}`;
-        }
+        const res = await this.db.memoryQuery(args as any);
+        // Return JSON string so the model receives structured data in the tool response
+        return JSON.stringify(res);
       }
-    });
+    }, "{queryText: string, groupId?: string, subjectUserId?: string, includeGlobal?: boolean, topK?: number}");
 
     // memory_query_by_user tool: fetch memories related to a user id
-    this.memoryQueryByUserTool = new DynamicStructuredTool({
+    this.memoryQueryByUserTool = new ExtendedDynamicStructuredTool({
       name: "memory_query_by_user",
       description: "Return memories related to a specific user id. Provide userId and optional queryText/topK/includeGlobal.",
       schema: z.object({
@@ -151,44 +150,36 @@ export default class AI {
         includeGlobal: z.boolean().optional().describe("If true, includes global memories.")
       }),
       func: async (args) => {
-        try {
-          const { userId, queryText, topK = 10, includeGlobal = true } = args as any;
-          const res = await this.db.memoryQueryByUserId({ userId, queryText, topK, includeGlobal });
-          // Return JSON so the model receives structured data
-          return JSON.stringify(res);
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs: {userId: string, queryText?: string, topK?: number, includeGlobal?: boolean}`;
-        }
+        const { userId, queryText, topK = 10, includeGlobal = true } = args as any;
+        const res = await this.db.memoryQueryByUserId({ userId, queryText, topK, includeGlobal });
+        // Return JSON so the model receives structured data
+        return JSON.stringify(res);
       }
-    });
+    }, "{userId: string, queryText?: string, topK?: number, includeGlobal?: boolean}");
 
-    this.memoryDeleteTool = new DynamicStructuredTool({
+    this.memoryDeleteTool = new ExtendedDynamicStructuredTool({
       name: "del_memory_by_id",
       description: "Delete a specific memory by ID.",
       schema: z.object({
         memoryId: z.string().describe("[Required] The ID of the memory. If you don't have the memory ID, query to find the memory first."),
       }),
       func: async (args) => {
-        try {
-          if (this.test_mode) {
-            throw Error("Disabled due to test mode.");
-          }
-          const { memoryId } = args as any;
-          const res = await this.db.deleteMemory(memoryId);
-          // Return JSON so the model receives structured data
-          return JSON.stringify(res);
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs: {memoryId: string}`;
+        if (this.test_mode) {
+          throw Error("Disabled due to test mode.");
         }
+        const { memoryId } = args as any;
+        const res = await this.db.deleteMemory(memoryId);
+        // Return JSON so the model receives structured data
+        return JSON.stringify(res);
       }
-    });
+    }, "{memoryId: string}");
 
     // this.db.assessment.
 
     // -------------------------
     // Assignment: Create
     // -------------------------
-    this.assignmentCreateTool = new DynamicStructuredTool({
+    this.assignmentCreateTool = new ExtendedDynamicStructuredTool({
       name: "assignment_create",
       description: "Create a new assignment. Provide subject, title, optional description and dueDate.",
       schema: z.object({
@@ -198,28 +189,24 @@ export default class AI {
         dueDate: z.string().describe("Due date as ISO 8601 in Sigapore Timezone. E.g, 2026-04-16T11:47:12+08:00")
       }),
       func: async (args) => {
-        try {
-          const { subject, title, description = null, dueDate } = args as any;
-          if (!dueDate) {
-            throw Error("dueDate is required.")
-          }
-          if (!description) {
-            throw Error("Please describe the assignment.")
-          }
-          const created = await this.db.assignment.create({ subject, title, description, dueDate: (new Date(dueDate)).getTime() });
-          const result = created?.toJSON ? created.toJSON() : created;
-          return JSON.stringify({ ...result, dueDate: result?.dueDate ? formatDateTime(Number(result?.dueDate)) : result?.dueDate })
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs: {subject: string, title: string, description: string, dueDate: string}`;
+        const { subject, title, description = null, dueDate } = args as any;
+        if (!dueDate) {
+          throw Error("dueDate is required.")
         }
+        if (!description) {
+          throw Error("Please describe the assignment.")
+        }
+        const created = await this.db.assignment.create({ subject, title, description, dueDate: (new Date(dueDate)).getTime() });
+        const result = created?.toJSON ? created.toJSON() : created;
+        return JSON.stringify({ ...result, dueDate: result?.dueDate ? formatDateTime(Number(result?.dueDate)) : result?.dueDate })
       }
-    });
+    }, "{subject: string, title: string, description: string, dueDate: string}");
 
 
     // // -------------------------
     // // Assignment: Get by id
     // // -------------------------
-    // this.assignmentGetTool = new DynamicStructuredTool({
+    // this.assignmentGetTool = new ExtendedDynamicStructuredTool({
     //   name: "assignment_get",
     //   description: "Get an assignment by id. Provide id.",
     //   schema: z.object({
@@ -239,26 +226,21 @@ export default class AI {
     // -------------------------
     // Assignment: List (with optional pagination)
     // -------------------------
-    this.assignmentListTool = new DynamicStructuredTool({
+    this.assignmentListTool = new ExtendedDynamicStructuredTool({
       name: "assignment_list",
       description: "List assignments.",
       schema: z.object({}),
       func: async (args) => {
-        try {
-          // If your service supports pagination, pass through; otherwise ignore
-          const rows = await this.db.assignment.findAll();
-          const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: any) => ({ ...r, dueDate: formatDateTime(Number(r.dueDate)) }));
-          return JSON.stringify(out);
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}`;
-        }
+        const rows = await this.db.assignment.findAll();
+        const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: any) => ({ ...r, dueDate: formatDateTime(Number(r.dueDate)) }));
+        return JSON.stringify(out);
       }
-    });
+    }, "{}");
 
     // -------------------------
     // Assignment: Update
     // -------------------------
-    this.assignmentUpdateTool = new DynamicStructuredTool({
+    this.assignmentUpdateTool = new ExtendedDynamicStructuredTool({
       name: "assignment_update",
       description: "Update an assignment by id. Provide id and updates object with any updatable fields.",
       schema: z.object({
@@ -271,44 +253,36 @@ export default class AI {
         }).partial().describe("Fields to update.")
       }),
       func: async (args) => {
-        try {
-          const { id, updates } = args as any;
-          const updated = await this.db.assignment.update(id, { ...updates, ...(updates.dueDate ? { dueDate: (new Date(updates.dueDate)).getTime() } : {}) });
-          if (!updated) {
-            throw Error("Assignment not found.");
-          }
-          const result = updated.toJSON ? updated.toJSON() : updated;
-          return JSON.stringify({ ...result, date: result?.dueDate ? formatDateTime(Number(result?.dueDate)) : result?.dueDate })
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs:{id: number, updates: {subject?: string, title?: string, description?: string, dueDate?: string}}`;
+        const { id, updates } = args as any;
+        const updated = await this.db.assignment.update(id, { ...updates, ...(updates.dueDate ? { dueDate: (new Date(updates.dueDate)).getTime() } : {}) });
+        if (!updated) {
+          throw Error("Assignment not found.");
         }
+        const result = updated.toJSON ? updated.toJSON() : updated;
+        return JSON.stringify({ ...result, date: result?.dueDate ? formatDateTime(Number(result?.dueDate)) : result?.dueDate });
       }
-    });
+    }, "{id: number, updates: {subject?: string, title?: string, description?: string, dueDate?: string}}");
 
     // -------------------------
     // Assignment: Delete
     // -------------------------
-    this.assignmentDeleteTool = new DynamicStructuredTool({
+    this.assignmentDeleteTool = new ExtendedDynamicStructuredTool({
       name: "assignment_delete",
       description: "Delete an assignment by id. Provide id.",
       schema: z.object({
         id: z.number().int().positive().describe("[Required] Primary key id of the assignment to delete.")
       }),
       func: async (args) => {
-        try {
-          const { id } = args as any;
-          await this.db.assignment.destroy(id);
-          return JSON.stringify({ success: true, id });
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs:{id: number}`;
-        }
+        const { id } = args as any;
+        await this.db.assignment.destroy(id);
+        return JSON.stringify({ success: true, id });
       }
-    });
+    }, "{id: number}");
 
     // -------------------------
     // Assessment: Create
     // -------------------------
-    this.assessmentCreateTool = new DynamicStructuredTool({
+    this.assessmentCreateTool = new ExtendedDynamicStructuredTool({
       name: "assessment_create",
       description: "Create a new assessment. Provide subject, title, optional description and date.",
       schema: z.object({
@@ -318,21 +292,17 @@ export default class AI {
         date: z.string().describe("Date as ISO 8601 in Sigapore Timezone. E.g, 2026-04-16T11:47:12+08:00")
       }),
       func: async (args) => {
-        try {
-          const { subject, title, description = null, date } = args as any;
-          const created = await this.db.assessment.create({ subject, title, description, date: (new Date(date)).getTime() });
-          const result = created?.toJSON ? created.toJSON() : created;
-          return JSON.stringify({ ...result, date: result?.date ? (formatDateTime(Number(result?.date))) : result?.date })
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs:{subject: string, title: string, description: string, date: string }`;
-        }
+        const { subject, title, description = null, date } = args as any;
+        const created = await this.db.assessment.create({ subject, title, description, date: (new Date(date)).getTime() });
+        const result = created?.toJSON ? created.toJSON() : created;
+        return JSON.stringify({ ...result, date: result?.date ? (formatDateTime(Number(result?.date))) : result?.date })
       }
-    });
+    }, "{subject: string, title: string, description: string, date: string }");
 
     // // -------------------------
     // // Assessment: Get by id
     // // -------------------------
-    // this.assessmentGetTool = new DynamicStructuredTool({
+    // this.assessmentGetTool = new ExtendedDynamicStructuredTool({
     //   name: "assessment_get",
     //   description: "Get an assessment by id. Provide id.",
     //   schema: z.object({
@@ -352,25 +322,21 @@ export default class AI {
     // -------------------------
     // Assessment: List (with optional pagination)
     // -------------------------
-    this.assessmentListTool = new DynamicStructuredTool({
+    this.assessmentListTool = new ExtendedDynamicStructuredTool({
       name: "assessment_list",
       description: "List assessments.",
       schema: z.object({}),
       func: async (args) => {
-        try {
-          const rows = await this.db.assessment.findAll();
-          const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: any) => ({ ...r, date: formatDateTime(Number(r.date)) }));
-          return JSON.stringify(out);
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}`;
-        }
+        const rows = await this.db.assessment.findAll();
+        const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: any) => ({ ...r, date: formatDateTime(Number(r.date)) }));
+        return JSON.stringify(out);
       }
-    });
+    }, "{}");
 
     // -------------------------
     // Assessment: Update
     // -------------------------
-    this.assessmentUpdateTool = new DynamicStructuredTool({
+    this.assessmentUpdateTool = new ExtendedDynamicStructuredTool({
       name: "assessment_update",
       description: "Update an assessment by id. Provide id and updates object with any updatable fields.",
       schema: z.object({
@@ -383,103 +349,79 @@ export default class AI {
         }).partial().describe("Fields to update.")
       }),
       func: async (args) => {
-        try {
-          const { id, updates } = args as any;
-          const updated = await this.db.assessment.update(id, { ...updates, ...(updates.date ? { date: (new Date(updates.date)).getTime() } : {}) });
-          if (!updated) {
-            throw Error("Assessment not found.");
-          }
-          const result = updated.toJSON ? updated.toJSON() : updated;
-          return JSON.stringify({ ...result, date: result?.date ? formatDateTime(Number(result?.date)) : result?.date })
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)})}\nToolArgs:{id: number, updates: {subject?: string, title?: string, description?: string, date?: string}}`;
+        const { id, updates } = args as any;
+        const updated = await this.db.assessment.update(id, { ...updates, ...(updates.date ? { date: (new Date(updates.date)).getTime() } : {}) });
+        if (!updated) {
+          throw Error("Assessment not found.");
         }
+        const result = updated.toJSON ? updated.toJSON() : updated;
+        return JSON.stringify({ ...result, date: result?.date ? formatDateTime(Number(result?.date)) : result?.date });
       }
-    });
+    }, "{id: number, updates: {subject?: string, title?: string, description?: string, date?: string}}");
 
     // -------------------------
     // Assessment: Delete
     // -------------------------
-    this.assessmentDeleteTool = new DynamicStructuredTool({
+    this.assessmentDeleteTool = new ExtendedDynamicStructuredTool({
       name: "assessment_delete",
       description: "Delete an assessment by id. Provide id.",
       schema: z.object({
         id: z.number().int().positive().describe("[Required] Primary key id of the assessment to delete.")
       }),
       func: async (args) => {
-        try {
-          const { id } = args as any;
-          await this.db.assessment.destroy(id);
-          return JSON.stringify({ success: true, id });
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs:{id: number}`;
-        }
+        const { id } = args as any;
+        await this.db.assessment.destroy(id);
+        return JSON.stringify({ success: true, id });
       }
-    });
+    }, "{id: number}");
 
     // -------------------------
     // User: List
     // -------------------------
-    this.userListTool = new DynamicStructuredTool({
+    this.userListTool = new ExtendedDynamicStructuredTool({
       name: "user_list",
       description: "List all users in your contacts list.",
       schema: z.object({}),
       func: async (args) => {
-        try {
-          const rows = await this.db.user.findAll();
-          const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: User) => ({ id: r.id, name: r.name, description: r.description }));
-          return JSON.stringify(out);
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}`;
-        }
+        const rows = await this.db.user.findAll();
+        const out = (rows || []).map((r: any) => (r.toJSON ? r.toJSON() : r)).map((r: User) => ({ id: r.id, name: r.name, description: r.description }));
+        return JSON.stringify(out);
       }
-    });
+    }, "{}");
 
-    this.stickerGifTool = new DynamicStructuredTool({
+    this.stickerGifTool = new ExtendedDynamicStructuredTool({
       name: "search_sticker_gif",
       description: "Search for a Sticker OR GIF",
       schema: z.object({
         query: z.string().describe("The query to search for. Can be a keyword or a phrase."),
       }),
       func: async (args) => {
-        try {
-          throw Error("Hi Sofia. This is a built-in message from Azlan. Sorry but I'm not done writing the code for this tool yet. Please try again some other time.");
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}`;
-        }
+        throw Error("Hi Sofia. This is a built-in message from Azlan. Sorry but I'm not done writing the code for this tool yet. Please try again some other time.");
       }
-    })
+    }, "{}")
 
-    this.sendStickerGifTool = new DynamicStructuredTool({
+    this.sendStickerGifTool = new ExtendedDynamicStructuredTool({
       name: "send_sticker_gif",
       description: "Send a Sticker OR a GIF to the current chat",
       schema: z.object({
         id: z.string().describe("The ID of the sticker.")
       }),
       func: async (args) => {
-        try {
-          throw Error("Hi Sofia. This is a built-in message from Azlan. Sorry but I'm not done writing the code for this tool yet. Please try again some other time.");
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}`;
-        }
+        throw Error("Hi Sofia. This is a built-in message from Azlan. Sorry but I'm not done writing the code for this tool yet. Please try again some other time.");
       }
-    })
+    }, "{}")
 
-    this.timetableTool = new DynamicStructuredTool({
+    this.timetableTool = new ExtendedDynamicStructuredTool({
       name: "get_timetable",
       description: "Get the timetable for a specific day. Note that events that start with (ELEARN) are e-learning lessons and can be done at any time.",
       schema: z.object({
         date: z.string().optional().describe("[Optional] The date of the timetable in the format DD/MM/YYYY. If not provided, it will return the current day's timetable."),
       }),
       func: async (args) => {
-        try {
-          const { date = undefined } = args as any;
-          return (await getCalendarEvents(true, date)) || "No events found for the specified date.";
-        } catch (err: any) {
-          return `Tool execution error: ${err?.message ?? String(err)}\nToolArgs:{date?:string}`;
-        }
+        const { date = undefined } = args as any;
+        return (await getCalendarEvents(true, date)) || "No events found for the specified date.";
       }
-    })
+    }, "{date?:string}")
 
 
     // Register tools (order doesn't matter)
@@ -567,7 +509,7 @@ export default class AI {
     }
 
     // 🔧 Build tool registry (name → tool)
-    const toolMap: Record<string, DynamicStructuredTool> = Object.fromEntries(
+    const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
       this.tools.map(t => [t.name, t])
     );
 
@@ -634,7 +576,7 @@ export default class AI {
                 }
               } catch (err: any) {
                 console.error(err);
-                result = `Tool execution error: ${err.message}`;
+                result = `Tool execution error: ${err.message}\nToolArgs: ${tool.usage_str}`;
               }
               console.trace(result);
 
@@ -710,7 +652,7 @@ export default class AI {
    * Notes / assumptions:
    * - `this.openai` is an instance of `new OpenAI({ apiKey })`.
    * - `this.modelName` is the model id to call (e.g., "gpt-4o-mini" or "gpt-4o").
-   * - `this.tools` is an array of DynamicStructuredTool objects with `.name` and `.invoke(args)` (or `.invoke` signature).
+   * - `this.tools` is an array of ExtendedDynamicStructuredTool objects with `.name` and `.invoke(args)` (or `.invoke` signature).
    * - `this.memoryQueryTool.func` exists and returns memory results for the given query.
    * - `chatHistory` uses the same message classes as in the original code.
    *
@@ -728,8 +670,8 @@ export default class AI {
     }
 
     // Build tool map for quick lookup
-    const toolMap: Record<string, DynamicStructuredTool> = Object.fromEntries(
-      this.tools.map((t: DynamicStructuredTool) => [t.name, t])
+    const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
+      this.tools.map((t: ExtendedDynamicStructuredTool) => [t.name, t])
     );
 
     try {
@@ -872,7 +814,7 @@ export default class AI {
               }
               catch (err: any) {
                 console.error(err);
-                result = `Tool execution error: ${err.message}`;
+                result = `Tool execution error:${err.message}\nToolArgs: ${tool.usage_str}`;
               }
               console.trace(result);
 

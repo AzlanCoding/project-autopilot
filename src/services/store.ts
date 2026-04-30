@@ -382,7 +382,7 @@ export default class Store {
   }
 
   /**
- * Wrapper used by the DynamicStructuredTool "memory_write".
+ * Wrapper used by the ExtendedDynamicStructuredTool "memory_write".
  * Delegates to insertMemoryWithDedupe (Milvus-backed) and returns a human-friendly string.
  */
   async memoryWrite(args: {
@@ -433,7 +433,7 @@ export default class Store {
   }
 
   /**
-   * Wrapper used by the DynamicStructuredTool "memory_query".
+   * Wrapper used by the ExtendedDynamicStructuredTool "memory_query".
    * Accepts queryText (or embedding in future) and returns an array of memory objects.
    */
   async memoryQuery(args: {
@@ -466,7 +466,7 @@ export default class Store {
   }
 
   /**
-   * Wrapper used by the DynamicStructuredTool "memory_query_by_user".
+   * Wrapper used by the ExtendedDynamicStructuredTool "memory_query_by_user".
    * Calls the Milvus-backed queryByUserId and returns results (JSON).
    */
   async memoryQueryByUserId(args: {
