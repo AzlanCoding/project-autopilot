@@ -45,11 +45,11 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 ## TODO
 *   ~~Add Tool Calls to chat history~~
 *   ~~Change prompts to `AI Class Assistant` instead of class chairperson.~~
+*   ~~Verify that RAG works.~~
 *   Add tool for sofia to schedule herself to do certain tasks.
 *   Add tool for sofia to get the timetable for the whole week given a week number (e.g. week 12). This will allow her to find out what is the date of the lesson in week n.
 *   Add tool for sofia to get a chat history.
 *   Change memory tool. Make it tell sofia related memory and suggest to delete when creating memory.
-*   Verify that RAG works.
 *   PDF Document Support
 *   Web Console
 *   Sticker & GIF support.
