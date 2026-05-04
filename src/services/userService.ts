@@ -3,21 +3,20 @@ import { Sequelize, ModelStatic, InferCreationAttributes, InferAttributes } from
 import { User } from '../models/User'; // Import User model
 import { PreProccessChatMsg } from './botService';
 import { formatDateTime } from '../utils/common';
-import {
-  HumanMessage,
-  BaseMessage,
-  AIMessage
-} from 'langchain';
+import { EasyInputMessage, ResponseInputItem } from 'openai/resources/responses/responses.js';
+import Store from './store';
 
 type UserCreateInput = Omit<InferCreationAttributes<User>, 'id'>;
 type UserAttributes = InferAttributes<User>;
 
 export class UserService {
+  private store: Store;
   private db: Sequelize;
   private Model: ModelStatic<User>;
 
-  constructor(sequelize: Sequelize) {
-    this.db = sequelize;
+  constructor(store: Store) {
+    this.store = store
+    this.db = this.store.db;
     this.Model = this.db.models.UserStore as ModelStatic<User>;
   }
 
@@ -54,92 +53,66 @@ export class UserService {
 
   /**
    * Takes an array of PreProccessChatMsg and merges consecutive messages from the same user.
-   * Function is wriiten by gemma 4. It is very poorly written but it works. It is not efficient and should be refactored.
    *
    * @param {PreProccessChatMsg[]} messages - The array of message objects.
    * @returns {Promise<string[]>} An array of formatted strings, one for each unique/merged message block.
    */
-  async formatAndMergeMessages(messages: PreProccessChatMsg[]): Promise<BaseMessage[]> {
+  async formatAndMergeMessages(messages: PreProccessChatMsg[], limit: number = 7): Promise<[Array<ResponseInputItem>, string?]> {
     if (!messages || messages.length === 0) {
-      return [];
+      return [[], undefined];
     }
 
     // const dateLimit = new Date().getTime() - 24 * 60 * 60 * 1000; // 24 hours ago
     // messages = (await Promise.all(messages.filter((m: PreProccessChatMsg) => m.time > dateLimit).map(async (m: PreProccessChatMsg) => ({ ...m, user: m.user ? (m.user == 'AI' ? m.user : await this.generateUserStringFromJid(m.user)) : "Unknown User" })))) as PreProccessChatMsg[];
     messages = (await Promise.all(messages.map(async (m: PreProccessChatMsg) => ({ ...m, user: m.user ? (m.user == 'AI' ? m.user : await this.generateUserStringFromJid(m.user)) : "Unknown User" })))) as PreProccessChatMsg[];
 
-    const results = [];
+    // TODO: Make Paralell
+    let newMessages: Array<ResponseInputItem | PreProccessChatMsg> = [];
+    for (let i = 0; i < messages.length; i++) {
+      newMessages.push(messages[i], ...(messages[i].id ? await this.store.toolCallHist.followTrail(messages[i].id as string) : []));
+    }
+
+    const results: ResponseInputItem[] = [];
     let i = 0;
 
-    while (i < messages.length) {
-      let currentMessage = messages[i];
+    let lastMsgId;
+
+    while (i < newMessages.length) {
+      let currentMessage = newMessages[i];
+      if (!(currentMessage as any).user) {
+        results.push(currentMessage as ResponseInputItem);
+        limit++;
+        i++;
+        continue;
+      }
+      currentMessage = currentMessage as PreProccessChatMsg;
       let mergedMessages = [currentMessage];
       let j = i + 1;
 
-      // Check for consecutive messages from the same user
-      while (j < messages.length && (messages[j].user === currentMessage.user)) {
+      if (currentMessage.id) {
+        lastMsgId = currentMessage.id;
+      }
 
-        // A more robust check for user equality might be needed depending on actual 'user' values,
-        // but based on the requirement, we check if the user matches the starting user.
-        if (messages[j].user === currentMessage.user) {
-          mergedMessages.push(messages[j]);
-          j++;
-        } else {
-          break;
-        }
+      // Check for consecutive messages from the same user
+      while (j < newMessages.length && (newMessages[j] as any).user && ((newMessages[j] as PreProccessChatMsg).user == currentMessage.user)) {
+        mergedMessages.push(newMessages[j] as PreProccessChatMsg);
+        j++;
       }
 
       // Process the merged block
       let user = currentMessage.user;
       let user_is_ai = user === 'AI';
       let outputParts = [];
-      let allMerged = true;
 
       for (let k = 0; k < mergedMessages.length; k++) {
         const msg = mergedMessages[k];
-        let msgParts = [];
 
         // Format components for the current message in the block
         let userText = msg.user ? (msg.user === 'AI' ? 'AI' : msg.user) : 'Unknown';
         let quotedMsgPart = msg.quotedMessage ? `Quoted Msg:${msg.quotedMessage}\n` : '';
-        let timeStamp = `Time:${formatDateTime(msg.time)}`; // Using toLocaleString() for better general readability
-
-        // // Build the structured part for the current message
-        // let currentBlock = `${userText}:\n${quotedMsgPart}\n${msg.text}\n${timeStamp}`;
-
-        // If we are not on the first message, we need to append the join string to the *previous* structure, 
-        // or adjust how we structure the overall block.
-        // Since the requirement shows the join *between* message structures, we will append the join string 
-        // before adding the subsequent message block content.
+        let timeStamp = `Time:${formatDateTime(msg.time * 1000)}`; // Using toLocaleString() for better general readability
 
         if (k > 0) {
-          // // For merged messages, the join logic is complex. 
-          // // Original format: ${user}:...${text}\ntime${...}
-          // // Merged format: ${user}:...${text}\ntime${...}\n${quotedMessage2}:...${text2}\ntime${...}
-
-          // // To achieve the structure suggested:
-          // // Message 1 block: (Structure for Msg 1)
-          // // Join: \n\n
-          // // Message 2 block: (Structure for Msg 2, but adjusted to flow from Message 1's time stamp)
-
-          // // Re-evaluating the merged format suggested:
-          // // `${user}:\n${quotedMessage ? "Quoted Msg:"+quotedMessage : ""}\n${text}\ntime${new Date(time).toLocalString()}\n${quotedMessage2 ? "Quoted Msg:"+quotedMessage2 : ""}\n${text2}\ntime${new Date(time2).toLocalString()}`
-
-          // // This suggests a flattened structure where only the *first* user's name is used, and subsequent messages 
-          // // are appended with extra context.
-
-          // // Let's build it sequentially based on the suggested output format:
-          // if (k === 1) {
-          //   // The second message starts directly after the time of the first message, separated by \n
-          //   outputParts.push(
-          //     `${msg.quotedMessage ? "Quoted Msg:" + msg.quotedMessage : ""}\n${msg.text}\nTime:${formatDateTime(msg.time)}`
-          //   );
-          // } else {
-          //   // For k > 1, it seems to follow the same pattern appended after the time stamp.
-          //   outputParts.push(
-          //     `${msg.quotedMessage ? "Quoted Msg:" + msg.quotedMessage : ""}\n${msg.text}\nTime:${formatDateTime(msg.time)}`
-          //   );
-          // }
           if (user_is_ai) {
             outputParts.push(msg.text);
           }
@@ -160,13 +133,13 @@ export class UserService {
 
       // Final assembly for the block
       let finalBlock = outputParts.join('\n\n');
-      results.push(finalBlock);
+      results.push((finalBlock.startsWith('AI:\n') ? { role: 'assistant', content: finalBlock.slice(4), type: 'message' } : { role: 'user', content: finalBlock, type: 'message' }) as EasyInputMessage);
 
       // Move index to the next unprocessed message
       i = j;
     }
 
-    return results.map(msg => msg.startsWith('AI:\n') ? new AIMessage(msg.slice(4)) : new HumanMessage(msg));
+    return [results.slice(limit * -1), lastMsgId];
   }
 
   // Example Usage (for testing/demonstration)

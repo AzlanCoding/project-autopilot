@@ -12,6 +12,8 @@ import { UserService } from './userService';
 import type AI from './ai';
 import { type Logger } from 'pino';
 import { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.js';
+import { ToolCallHistService } from './ToolCallHistService';
+import { ToolCallHist } from '../models/ToolCallHist';
 
 const SETTINGS_PATH = './assets/settings.json';
 interface AppSettings { subjects: { [k: string]: string }; reminders: number[]; }
@@ -24,6 +26,7 @@ export default class Store {
   settings: AppSettings;
   assignment: AssignmentService;
   assessment: AssessmentService;
+  toolCallHist: ToolCallHistService;
   user: UserService;
   private logger: Logger;
 
@@ -45,7 +48,8 @@ export default class Store {
 
     this.assignment = new AssignmentService(this, this.logger);
     this.assessment = new AssessmentService(this, this.logger);
-    this.user = new UserService(this.db);
+    this.toolCallHist = new ToolCallHistService(this, this.logger);
+    this.user = new UserService(this);
   }
 
   async init() {
@@ -55,11 +59,13 @@ export default class Store {
     const AssignmentModel = Assignment.register(this.db);
     const AssessmentModel = Assessment.register(this.db);
     const UserModel = User.register(this.db);
+    const ToolCallHistModel = ToolCallHist.register(this.db);
 
     // Optionally ensure they are available on sequelize.models with the same keys you expect
     this.db.models.AssignmentStore = AssignmentModel;
     this.db.models.AssessmentStore = AssessmentModel;
     this.db.models.UserStore = UserModel;
+    this.db.models.ToolCallHistStore = ToolCallHistModel;
 
     // this.assignment = AssignmentModel as any; // Quick Fix
     // this.assessment = AssessmentModel as any; // Quic Fix
@@ -69,12 +75,14 @@ export default class Store {
     await AssignmentModel.sync({ alter: true });
     await AssessmentModel.sync({ alter: true });
     await User.sync({ alter: true });
+    await ToolCallHistModel.sync({ alter: true });
 
     this.assignment = new AssignmentService(this, this.logger);
     await this.assignment.initService();
     this.assessment = new AssessmentService(this, this.logger);
     await this.assessment.initService();
-    this.user = new UserService(this.db);
+    this.user = new UserService(this);
+    this.toolCallHist = new ToolCallHistService(this, this.logger);
 
     // for (let table in tables) {
     //   const tbl = this.db.define(table, tables[table]);

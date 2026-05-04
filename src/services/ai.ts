@@ -18,7 +18,7 @@ import { formatDateTime } from '../utils/common';
 import { User } from '../models/User';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
-import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses.js';
+import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
 
 export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
   usage_str: string
@@ -30,7 +30,7 @@ export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
 
 export default class AI {
   ai_user_id: string = "ea502c0f-7fe6-4f7c-9d63-80dd7b0de90e";
-  test_mode: boolean = false;
+  test_mode: boolean = (process.env.TESTING != undefined && process.env.TESTING.toLowerCase() == "true");
   logger: Logger;
   db: Store;
   openai = new OpenAI(
@@ -712,7 +712,7 @@ export default class AI {
             return { output: m.content, call_id: m.tool_call_id || m.id, type: "function_call_output" } as ResponseInputItem.FunctionCallOutput;
           }
           // Fallback
-          return { role: "user", content: ((m as any).content ?? "") as string, type: "message" } as EasyInputMessage;
+          return { role: "assistant", content: ((m as any).content ?? "") as string, type: "message" } as EasyInputMessage;
         });
 
 
@@ -892,6 +892,297 @@ export default class AI {
     }
   }
 
+  async * processChatv3(
+    chatHistory: Array<ResponseInputItem>,
+    userInput?: string,
+    additionalOptions: Partial<ResponseCreateParamsStreaming> = {}
+  ) {
+    // Add user message to history if provided
+    if (userInput) {
+      const userMessage = {
+        role: 'user',
+        content: userInput,
+        type: 'message'
+      } as EasyInputMessage;
+      chatHistory.push(userMessage);
+    }
+
+    // Build tool map for quick lookup
+    const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
+      this.tools.map((t: ExtendedDynamicStructuredTool) => [t.name, t])
+    );
+
+    try {
+      console.log("\n🤖 Thinking (v3 with official OpenAI client)...");
+
+      // Query memory and add a system hint if relevant
+      const memory = await this.memoryQueryTool.func({ queryText: userInput || (chatHistory.filter(m => m.type == 'message' && m.role == 'user').slice(-1)[0] as EasyInputMessage).content });
+      if (Array.isArray(memory) && memory.length > 0) {
+        chatHistory.push({
+          role: 'system',
+          content: `Possibly relevant memory data: ${memory}`,
+          type: 'message'
+        } as EasyInputMessage);
+      }
+
+      // // Convert chatHistory to the shape expected by the OpenAI Responses API
+      // const buildMessagesForOpenAI: (history: BaseMessage[]) => Array<ResponseInputItem> = (history) =>
+      //   history.map((m) => {
+      //     // Map your message classes to role/content pairs
+      //     if (m instanceof HumanMessage) {
+      //       return { role: "user", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+      //     }
+      //     if (m instanceof AIMessage) {
+      //       if (m.tool_calls) {
+      //         for (let i = 0; i < m.tool_calls.length; i++) {
+      //           return {
+      //             call_id: (m.tool_calls[i] as any).id,
+      //             arguments: (m.tool_calls[i] as any).args instanceof String ? (m.tool_calls[i] as any).args : JSON.stringify((m.tool_calls[i] as any).args),
+      //             name: (m.tool_calls[i] as any).name, type: 'function_call'
+      //           } as ResponseFunctionToolCall
+      //         }
+      //       }
+      //       else {
+      //         return { role: "assistant", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+      //       }
+      //     }
+      //     if (m instanceof SystemMessage) {
+      //       return { role: "system", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+      //     }
+      //     if (m instanceof ToolMessage) {
+      //       // ToolMessage is treated as assistant content (tool output)
+      //       return { output: m.content, call_id: m.tool_call_id || m.id, type: "function_call_output" } as ResponseInputItem.FunctionCallOutput;
+      //     }
+      //     // Fallback
+      //     return { role: "assistant", content: ((m as any).content ?? "") as string, type: "message" } as EasyInputMessage;
+      //   });
+
+
+      // We'll accumulate the full assistant text and a small buffer for chunked yields
+      let fullResponseContent = "";
+      let buffer = "";
+
+      // // Helper to flush buffer as chunk_display
+      // const flushBuffer = (delimiter: boolean) => {
+      //   if (!buffer) return null;
+      //   const out = {
+      //     type: "chunk_display",
+      //     content: buffer,
+      //     delimiter,
+      //   };
+      //   buffer = "";
+      //   return out;
+      // };
+
+      const handleStream = async function* (instance: AI): AsyncGenerator<{
+        type: 'chunk_display' | 'done',
+        content: string,
+        delimiter: boolean
+      } | {
+        type: 'tool_call',
+        data: ResponseFunctionToolCall
+      } | {
+        type: 'reasoning',
+        data: ResponseReasoningItem
+      } | {
+        type: 'tool_call_output',
+        data: ResponseInputItem.FunctionCallOutput
+      }> {
+        instance.logger.trace("CHAT CALL START")
+        let hasToolCalls = false;
+        instance.logger.trace(chatHistory, "CHAT HISTORY CREATED");
+        // Start streaming from the Responses API
+        // The official client exposes a streaming helper `client.responses.stream`.
+        // We pass `input` as the messages array.
+        const stream = await instance.openai.responses.create({
+          model: "qwen3.5-plus",
+          input: chatHistory,
+          stream: true,
+          tools: instance.tools.map((t) => ({
+            type: "function",
+            name: t.name,
+            description: t.description,
+            parameters: z.toJSONSchema(t.schema as any, {
+              target: 'draft-7',
+            }),
+            strict: true
+          })),
+          tool_choice: "auto",
+          // You can pass additional options here (e.g., temperature) if desired
+          ...additionalOptions
+        });
+
+        for await (const event of stream) {
+          instance.logger.trace(event, "CHAT EVENT");
+          if (event.type == "response.output_item.done") {
+            if (event.item.type == "function_call") {
+              hasToolCalls = true;
+              let args;
+              try {
+                if (event.item.arguments.trim() == "") {
+                  args = {}
+                }
+                else {
+                  args = JSON.parse(event.item.arguments) || {}
+                }
+              }
+              catch {
+                args = event.item.arguments
+              }
+
+              chatHistory.push(
+                event.item
+                // new AIMessage({
+                //   content: "",
+                //   tool_calls: [{
+                //     type: "tool_call",
+                //     id: event.item.call_id,
+                //     name: event.item.name,
+                //     args
+                //   }],
+                // })
+              );
+
+              yield {
+                type: 'tool_call',
+                data: event.item
+              }
+
+              console.dir(event.item)
+              console.log(`Called ${event.item.name}`)
+              const tool = toolMap[event.item.name];
+              let result: string;
+              try {
+                if (!tool) {
+                  result = `Error: Unknown tool "${event.item.name}"`;
+                } else {
+
+                  if (buffer) {
+                    yield {
+                      type: "chunk_display",
+                      content: buffer,
+                      delimiter: false,
+                    };
+                    buffer = "";
+                  }
+
+                  // parse args safely (if present)
+                  const args2 = JSON.parse(event.item.arguments) ?? {};
+                  console.trace(args2)
+                  result = await tool.invoke(args2);
+
+                }
+
+              }
+              catch (err: any) {
+                console.error(err);
+                result = `Tool execution error:${err.message}\nToolArgs: ${tool.usage_str}`;
+              }
+              console.trace(result);
+
+              const outputData = {
+                output: result,
+                call_id: event.item.call_id,
+                type: 'function_call_output'
+              } as ResponseInputItem.FunctionCallOutput
+
+              chatHistory.push(
+                outputData
+                // new ToolMessage({
+                //   content: result,
+                //   tool_call_id: event.item.call_id,
+                // })
+              )
+              yield {
+                type: 'tool_call_output',
+                data: outputData
+              }
+
+            }
+            else if (event.item.type == 'reasoning') {
+              chatHistory.push({
+                id: event.item.id,
+                summary: event.item.summary,
+                type: 'reasoning'
+              } as ResponseReasoningItem)
+              yield {
+                type: "reasoning",
+                data: event.item,
+              }
+            }
+          }
+          else if (event.type == "response.output_text.delta") {
+            // 📡 NORMAL STREAMING (unchanged)
+            const chunkText = (event.delta || "") as string;
+            fullResponseContent += chunkText;
+            buffer += chunkText;
+
+            if (buffer.includes("\n\n")) {
+              let text = buffer.slice(0, buffer.indexOf("\n\n"));
+              buffer = buffer.slice(buffer.indexOf("\n\n") + 2);
+
+              yield {
+                type: "chunk_display",
+                content: text,
+                delimiter: true,
+              };
+            }
+          }
+        }
+
+        if (hasToolCalls) {
+          instance.logger.trace("RECALLING!!!")
+          yield* handleStream(instance);
+          return;
+        }
+
+      }
+
+      for await (const event of handleStream(this)) {
+        yield event;
+      }
+
+
+
+      // 🧩 Flush remaining buffer
+      if (buffer) {
+        yield {
+          type: "chunk_display",
+          content: buffer,
+          delimiter: false,
+        };
+      }
+
+      // Persist final AI response into chatHistory
+      chatHistory.push(
+        {
+          role: 'assistant',
+          content: fullResponseContent,
+          type: 'message'
+        } as EasyInputMessage
+        // new AIMessage(fullResponseContent)
+      );
+
+      // Return final chatHistory
+      yield {
+        type: "done",
+        content: chatHistory,
+        delimiter: false
+      };
+    } catch (error) {
+      console.error("\n🚨 Oops! Something went wrong (v3):", error);
+      // If we added the user's message at the top and want to revert it on error, pop it
+      if (userInput) {
+        // remove last message if it matches the user input
+        const last = chatHistory[chatHistory.length - 1];
+        if (last.type == 'message' && last.role == 'user') {
+          chatHistory.pop();
+        }
+      }
+      throw error;
+    }
+  }
+
 
   async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string): Promise<string> {
     // 1. Read the System Prompt from the file
@@ -911,11 +1202,11 @@ export default class AI {
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }
 
-  async shouldRespond(history: BaseMessage[]) {
+  async shouldRespond(history: ResponseInputItem[]) {
     if (history.length == 0) {
       return false
     };
-    const messages = history.map(m => m.type == 'ai' ? `AI: ${m.content}` : m.content).join('\n\n');
+    const messages = (history.filter(m => m.type == 'message') as EasyInputMessage[]).map(m => m.role == 'assistant' ? `AI: ${m.content}` : `User: ${m.content}`).join('\n\n');
     const model = new ChatOpenAI({
       apiKey: process.env.ALIBABA_API_KEY,
       model: 'qwen-flash',
@@ -928,16 +1219,20 @@ export default class AI {
     }))
     const systemMsg = `You determine whether an AI named Sofia should respond.
 Rules:
-- Respond ONLY if the latest message is asking a question to her or asking her to do something. If not do not respond.
-Examples when you should respond:
-- "Sofia, what is the timetable for tomorrow."
-- "Sofia can you play a game with me?"
-- "Sofia create a new assignment with the information above."
-- "Sofia, can you help me check what assessments we have soon?" 
+- DO NOT Respond ONLY if the latest message is not asking her to do something or asking her a question. 
+- Respond If the user is following up on a previous statement and its appropriate for Sofia to reply.
+- Respond if it is appropriate to comment.
 Examples when you should not respond:
 - "Sofia will be able to send GIFs and Stickers."
 - "I've added a new feature to sofia."
 - "I've just fixed some bugs with sofia."
+Examples when you should respond:
+- "Sofia, this is amazing isn't it?"
+- "I think sofia might know."
+- "Sofia, what is the timetable for tomorrow."
+- "Sofia can you play a game with me?"
+- "Sofia create a new assignment with the information above."
+- "Sofia, can you help me check what assessments we have soon?" 
 `
     const userMsg = `This is the current Chat History:\n${messages}\nShould AI model Sofia reply?`
     const output = await model.invoke([new SystemMessage(systemMsg), new HumanMessage(userMsg)]);
@@ -964,7 +1259,7 @@ Examples when you should not respond:
       });
 
       console.log("\n=============================================================================");
-      console.log("👋 Hi there! I'm Sofia, your AI class chairperson!");
+      console.log("👋 Hi there! I'm Sofia, your AI class assistant!");
       console.log("Feel free to chat with me about anything—academics, vibes, life stuff! 😊");
       console.log("Type 'exit' or 'quit' when you're done.");
       console.log("=========================================================================\n");

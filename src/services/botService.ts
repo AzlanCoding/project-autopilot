@@ -12,9 +12,11 @@ import type AI from "./ai";
 import { ExtendedDynamicStructuredTool } from "./ai";
 import { SystemMessage } from 'langchain';
 import z from "zod";
+import { EasyInputMessage, ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
 
 export interface PreProccessChatMsg {
+  id?: string,
   user?: 'AI' | string | null,
   time: number,
   text: string,
@@ -217,9 +219,9 @@ export class SofiaBot {
                   }
                 }
 
-                if (!msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
+                if ((!process.env.TESTING || process.env.TESTING.toLowerCase() != "true") && !msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
                   const id = generateMessageIDV2(this.sock!.user?.id);
-                  this.logger.info(`Received Message from Chat: ${msg.key.remoteJidAlt || this.parseJid(msg.key.remoteJid)}`)
+                  this.logger.info(msg, `Received Message from Chat: ${msg.key.remoteJidAlt || this.parseJid(msg.key.remoteJid)}`)
                   if (msg.key.remoteJid) {
                     await this.sock!.presenceSubscribe(msg.key.remoteJid); // Subscribe to precense updates so that it can see who is typing...
                     await this.sock!.readMessages([msg.key]);
@@ -227,10 +229,7 @@ export class SofiaBot {
                       await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!)
                       const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
                       if (chatHistory[chatHistory.length - 1].user != 'AI') {
-                        // // TODO: Map User ID and procees chat and send response 
-                        // await this.sock!.sendMessage(msg.key.remoteJid!, { text: "PROCESS DEBUG" })
-
-                        const chatHistoryParsed = (await this.db.user.formatAndMergeMessages(chatHistory)).slice(-7);// Limit to 7 messages
+                        let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') ? 12 : 7)); // Limit to 12 messages for group chats and 7 for individual chats.
                         this.logger.trace(chatHistoryParsed);
                         // if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.toLowerCase().includes('sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
                         if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory[chatHistory.length - 1].text.toLowerCase().includes('sofia') && await this.ai.shouldRespond(chatHistoryParsed))) {
@@ -259,7 +258,10 @@ export class SofiaBot {
                           return;
                         }
                         let firstMsg = true;
-                        const streamGenerator = this.ai.processChatv2([new SystemMessage(systemPrompt), ...chatHistoryParsed]);
+                        const streamGenerator = this.ai.processChatv3([{
+                          role: 'system',
+                          content: systemPrompt
+                        } as EasyInputMessage, ...(chatHistoryParsed as Array<ResponseInputItem>)]);
 
                         const replyMsg: WAMessage = {
                           message: {
@@ -283,15 +285,30 @@ export class SofiaBot {
                             if (yieldState.delimiter) {
                               process.stdout.write("\n-------------------------------\n");
                             }
+                            let newMsg;
                             if (firstMsg) {
-                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string }, { quoted: replyMsg });
+                              newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string }, { quoted: replyMsg });
                               firstMsg = false;
                             }
                             else {
-                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
+                              newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
                             }
+                            lastMsgId = newMsg?.key.id as string | undefined;
                           } else if (yieldState.type === 'done') {
                             break; // Exit the loop after the full content is collected
+                          } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'reasoning') {
+                            if (!lastMsgId) {
+                              this.logger.error("ERROR: No Last Message ID, Tool call and reasoning data not saved!");
+                            }
+                            else {
+                              const newToolCallHist = await this.db.toolCallHist.create({
+                                id: undefined,
+                                whatsapp_chat: msg.key.remoteJidAlt || msg.key.remoteJid!,
+                                aftId: lastMsgId,
+                                data: (yieldState as any).data,
+                              })
+                              lastMsgId = newToolCallHist.id;
+                            }
                           }
                         }
                       }
@@ -412,10 +429,10 @@ export class SofiaBot {
     const getText = (m: WAMessage) => m.message?.stickerMessage ? `<WhatsApp Sticker Or GIF>` : m.message?.videoMessage ? `<WhatsApp Video> ${m.message.videoMessage.caption || ""}` : m.message?.imageMessage ? `<WhatsApp Image> ${m.message.imageMessage.caption || ""}` : m.message?.conversation || m.message?.extendedTextMessage?.text;
     const getQuotedText = (q: proto.IMessage) => this.shortenQuotedText(q.stickerMessage ? `<WhatsApp Sticker Or GIF>` : q?.videoMessage ? `<WhatsApp Video> ${q.videoMessage.caption || ""}` : q.imageMessage ? `<WhatsApp Image> ${q.imageMessage.caption || ""}` : q.conversation || q.extendedTextMessage?.text);
     if (remoteJid.endsWith("@g.us")) {
-      return (await Promise.all(messages.map(async (m: WAMessage) => ({ user: m.key.fromMe ? "AI" : this.parseJid(remoteJidAlt || await this.sock!.signalRepository.lidMapping.getPNForLID(m.participant || m.key.participant || "")), time: (m.messageTimestamp as any).low || m.messageTimestamp, text: await parseMentions(m, getText(m)), quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null })))).filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time)
+      return (await Promise.all(messages.map(async (m: WAMessage) => ({ id: m.key.id, user: m.key.fromMe ? "AI" : this.parseJid(remoteJidAlt || await this.sock!.signalRepository.lidMapping.getPNForLID(m.participant || m.key.participant || "")), time: (m.messageTimestamp as any).low || m.messageTimestamp, text: await parseMentions(m, getText(m)), quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null })))).filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time) as PreProccessChatMsg[]
     }
     else {
-      return (await Promise.all(messages.map(async (m: WAMessage) => ({ user: m.key.fromMe ? "AI" : this.parseJid(remoteJidAlt), time: (m.messageTimestamp as any).low || m.messageTimestamp, text: await parseMentions(m, getText(m)), quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null })))).filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time)
+      return (await Promise.all(messages.map(async (m: WAMessage) => ({ id: m.key.id, user: m.key.fromMe ? "AI" : this.parseJid(remoteJidAlt), time: (m.messageTimestamp as any).low || m.messageTimestamp, text: await parseMentions(m, getText(m)), quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null })))).filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time) as PreProccessChatMsg[]
     }
   }
 
