@@ -916,11 +916,12 @@ export default class AI {
       console.log("\n🤖 Thinking (v3 with official OpenAI client)...");
 
       // Query memory and add a system hint if relevant
-      const memory = await this.memoryQueryTool.func({ queryText: userInput || (chatHistory.filter(m => m.type == 'message' && m.role == 'user').slice(-1)[0] as EasyInputMessage).content });
+      const memory = JSON.parse(await this.memoryQueryTool.func({ queryText: userInput || (chatHistory.filter(m => m.type == 'message' && m.role == 'user').slice(-1)[0] as EasyInputMessage).content }));
+      this.logger.trace(memory, "Memory data retrieve")
       if (Array.isArray(memory) && memory.length > 0) {
         chatHistory.push({
           role: 'system',
-          content: `Possibly relevant memory data: ${memory}`,
+          content: `Possibly relevant memory data to aid with responses: ${memory.map(m => m.text).join(';')}`,
           type: 'message'
         } as EasyInputMessage);
       }
@@ -1192,10 +1193,10 @@ export default class AI {
     // 2. Get memory for a current user id
     const memories = mode == 'group' ? '' : await this.memoryQueryByUserTool.func({ userId: current_user_id }) as string;
     const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
-    User Memories: ${JSON.stringify(JSON.parse(memories).data)}
+    User Memories: ${JSON.parse(memories).data.filter((m: any) => m.category != 'core').slice(-10).map((m: any) => m.text).join(';')}
     If you have no memory of saying hi to this user for the first time, please use the \`memory_write\` tool call to save this event (leave category empty) and then introduce yourself to the user.`}
     Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (GIFs and Stickers unavaliable in this mode)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
-    Your Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
+    Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Avaliable Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.`
     // Avaliable Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
