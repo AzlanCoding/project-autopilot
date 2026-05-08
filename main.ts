@@ -26,25 +26,25 @@ const main = async () => {
 
   const ai = new AI(db, logger);
 
-  // // Set up job to send daily message
-  // // '0 0 7 * * 1-5' means: At 07:00:00 on Monday through Friday
-  // new Cron('0 0 7 * * 1-5', function () {
-  //   (async () => {
-  //     logger.info(`Daily Message Job executing`);
-  //     const data = await ai.timetableTool.func({});
-  //     if (data == "No events found for the specified date.") {
-  //       logger.info(`Daily Message Job Cancelled due to no events`);
-  //       return;
-  //     }
-  //     await db.ai_scheduled_task_runner!(
-  //       async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class. If it esist, remove the classes that is only for Azlan (e.g, the green screen and visual effects class).`
-  //     );
+  // Set up job to send daily message
+  // '0 0 7 * * 1-5' means: At 07:00:00 on Monday through Friday
+  new Cron('0 0 7 * * 1-5', function () {
+    (async () => {
+      logger.info(`Daily Message Job executing`);
+      const data = await ai.timetableTool.func({});
+      if (data == "No events found for the specified date.") {
+        logger.info(`Daily Message Job Cancelled due to no events`);
+        return;
+      }
+      await db.ai_scheduled_task_runner!(
+        async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class. If it esist, remove the classes that is only for Azlan (e.g, the green screen and visual effects class).`
+      );
 
-  //     logger.info(`Daily Message Job Finished executed`);
-  //   })().catch(error => {
-  //     logger.error(error, 'Error executing daily message scheduled job');
-  //   })
-  // });
+      logger.info(`Daily Message Job Finished executed`);
+    })().catch(error => {
+      logger.error(error, 'Error executing daily message scheduled job');
+    })
+  });
 
 
   const bot = new SofiaBot(logger, ai, db);

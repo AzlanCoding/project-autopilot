@@ -1198,7 +1198,8 @@ export default class AI {
     Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (GIFs and Stickers unavaliable in this mode)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Avaliable Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-    User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.`
+    User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.
+    Additionally, before using the \`send_message\` tool call, make sure to show the user what message you're sending.`
     // Avaliable Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }
@@ -1220,9 +1221,10 @@ export default class AI {
     }))
     const systemMsg = `You determine whether an AI named Sofia should respond.
 Rules:
-- DO NOT Respond ONLY if the latest message is not asking her to do something or asking her a question. 
+- Respond if any of the recent messages is a question or asking her to do something or asking her a question. 
 - Respond If the user is following up on a previous statement and its appropriate for Sofia to reply.
 - Respond if it is appropriate to comment.
+- Other than that, do not respond.
 Examples when you should not respond:
 - "Sofia will be able to send GIFs and Stickers."
 - "I've added a new feature to sofia."
@@ -1230,6 +1232,8 @@ Examples when you should not respond:
 Examples when you should respond:
 - "Sofia, this is amazing isn't it?"
 - "I think sofia might know."
+- "Sofia, you're a genius!"
+- "Maybe sofia can help think of smt..."
 - "Sofia, what is the timetable for tomorrow."
 - "Sofia can you play a game with me?"
 - "Sofia create a new assignment with the information above."

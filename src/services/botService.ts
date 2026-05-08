@@ -226,16 +226,32 @@ export class SofiaBot {
                     await this.sock!.presenceSubscribe(msg.key.remoteJid); // Subscribe to precense updates so that it can see who is typing...
                     await this.sock!.readMessages([msg.key]);
                     this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
-                      await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!)
+                      await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
                       const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
                       if (chatHistory[chatHistory.length - 1].user != 'AI') {
-                        let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') ? 12 : 7)); // Limit to 12 messages for group chats and 7 for individual chats.
+                        let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, 12)); // Limit to 12 messages.
                         this.logger.trace(chatHistoryParsed);
                         // if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.toLowerCase().includes('sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
-                        if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory[chatHistory.length - 1].text.toLowerCase().includes('sofia') && await this.ai.shouldRespond(chatHistoryParsed))) {
-                          await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
-                          this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
-                          return;
+                        if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
+
+                          let shouldReply = false;
+                          for (let i = 0; i < chatHistoryParsed.length; i++) {
+                            const msg = chatHistoryParsed[i];
+                            if (msg.type == 'message') {
+                              if (msg.role == 'assistant') {
+                                shouldReply = false;
+                              }
+                              else if (msg.role == 'user' && msg.content.toString().toLowerCase().includes('sofia')) {
+                                shouldReply = true;
+                              }
+                            }
+                          }
+
+                          if (!shouldReply) {
+                            await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
+                            this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
+                            return;
+                          }
                         }
                         let systemPrompt;
                         if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
@@ -294,6 +310,7 @@ export class SofiaBot {
                               newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
                             }
                             lastMsgId = newMsg?.key.id as string | undefined;
+                            await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
                           } else if (yieldState.type === 'done') {
                             break; // Exit the loop after the full content is collected
                           } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'reasoning') {
