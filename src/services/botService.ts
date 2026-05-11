@@ -352,7 +352,7 @@ export class SofiaBot {
           const precense = events['presence.update']
           // console.dir(precense)
           this.logger.debug(precense)
-          if (this.bufferSystem.chatBuffers[precense.id]) {
+          if (!precense.id.endsWith('@g.us') && this.bufferSystem.chatBuffers[precense.id]) {
             if (Object.values(precense.presences).some(p => p.lastKnownPresence == 'composing')) {
               this.bufferSystem.pauseBuffer(precense.id);
             }
