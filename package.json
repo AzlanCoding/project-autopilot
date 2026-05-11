@@ -19,7 +19,7 @@
     "@langchain/openai": "^1.4.4",
     "@zilliz/milvus2-sdk-node": "^2.6.13",
     "axios": "^1.15.0",
-    "baileys": "7.0.0-rc.9",
+    "baileys": "7.0.0-rc10",
     "baileys-bottle-devstroupe": "^2.3.66",
     "croner": "^10.0.1",
     "dotenv": "^17.3.1",
