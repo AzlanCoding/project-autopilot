@@ -335,12 +335,6 @@ export class SofiaBot {
                   } else {
                     this.logger.error('Error getting msg.key.remoteJid, value is null or undefined!');
                   }
-
-
-                  // bot.store.messages.all("120363403991601826@g.us").then(r => console.dir(r.map(m => ({user: m.key.fromMe ? "AI" : "User", time: m.messageTimestamp.low || m.messageTimestamp,  text: m.message.conversation || m.message.extendedTextMessage?.text || m.message.protocolMessage?.editedMessage?.extendedTextMessage?.text})).sort((a,b) => a.time - b.time))).catch(e => console.error(e))
-                  // bot.sock.signalRepository.lidMapping.getPNForLID('95838302908522@lid').then(r => console.dir(r)).catch(e => console.error(e))
-                  // this.logger.debug({ id, orig_id: msg.key.id }, 'replying to message');
-                  // this.sendMessage(msg.key.remoteJid!, 'pong ' + msg.key.id);
                 }
               }
             }
