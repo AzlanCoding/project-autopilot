@@ -14,7 +14,7 @@ import { z } from "zod";
 import { OpenAI } from "openai";
 // import { ChatOllama } from '@langchain/ollama'
 import Store from './store';
-import { formatDateTime } from '../utils/common';
+import { formatDateTime, getTime, parseTimestamp } from '../utils/common';
 import { User } from '../models/User';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
@@ -921,7 +921,7 @@ export default class AI {
       if (Array.isArray(memory) && memory.length > 0) {
         chatHistory.push({
           role: 'system',
-          content: `Possibly relevant memory data to aid with responses: ${memory.map(m => m.text).join(';')}`,
+          content: `Possibly relevant memory data to aid with responses: ${memory.map(m => `${parseTimestamp(m.created_at)}:${m.text}`).join(';')}\nFor time-dependant memory, take into account the current datetime so that you only use what is relevant. Current Datetime:${parseTimestamp(getTime())}`,
           type: 'message'
         } as EasyInputMessage);
       }

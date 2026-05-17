@@ -40,7 +40,7 @@ export function formatDateTime(date: number | Date) {
   return moment(date).format('DD/MM/YYYY, ddd (HH:mm:ss)')
 }
 
-export function parseTimestamp(timestamp: number): string {
+export function parseTimestamp(timestamp: number | string): string {
   return moment(timestamp).format('DD/MM/YYYY (HH:mm)')
 }
 
