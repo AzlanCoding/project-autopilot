@@ -220,120 +220,124 @@ export class SofiaBot {
                 }
 
                 if ((!process.env.TESTING || process.env.TESTING.toLowerCase() != "true") && !msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
-                  const id = generateMessageIDV2(this.sock!.user?.id);
-                  this.logger.info(msg, `Received Message from Chat: ${msg.key.remoteJidAlt || this.parseJid(msg.key.remoteJid)}`)
-                  if (msg.key.remoteJid) {
-                    await this.sock!.presenceSubscribe(msg.key.remoteJid); // Subscribe to precense updates so that it can see who is typing...
-                    await this.sock!.readMessages([msg.key]);
-                    this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
-                      await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
-                      const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
-                      if (chatHistory[chatHistory.length - 1].user != 'AI') {
-                        let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, 12)); // Limit to 12 messages.
-                        this.logger.trace(chatHistoryParsed);
-                        // if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.toLowerCase().includes('sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
-                        if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
+                  try {
+                    const id = generateMessageIDV2(this.sock!.user?.id);
+                    this.logger.info(msg, `Received Message from Chat: ${msg.key.remoteJidAlt || this.parseJid(msg.key.remoteJid)}`)
+                    if (msg.key.remoteJid) {
+                      await this.sock!.presenceSubscribe(msg.key.remoteJid); // Subscribe to precense updates so that it can see who is typing...
+                      await this.sock!.readMessages([msg.key]);
+                      this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
+                        await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
+                        const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
+                        if (chatHistory[chatHistory.length - 1].user != 'AI') {
+                          let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, 12)); // Limit to 12 messages.
+                          this.logger.trace(chatHistoryParsed);
+                          // if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.toLowerCase().includes('sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
+                          if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
 
-                          let shouldReply = false;
-                          for (let i = 0; i < chatHistoryParsed.length; i++) {
-                            const msg = chatHistoryParsed[i];
-                            if (msg.type == 'message') {
-                              if (msg.role == 'assistant') {
-                                shouldReply = false;
-                              }
-                              else if (msg.role == 'user' && msg.content.toString().toLowerCase().includes('sofia')) {
-                                shouldReply = true;
+                            let shouldReply = false;
+                            for (let i = 0; i < chatHistoryParsed.length; i++) {
+                              const msg = chatHistoryParsed[i];
+                              if (msg.type == 'message') {
+                                if (msg.role == 'assistant') {
+                                  shouldReply = false;
+                                }
+                                else if (msg.role == 'user' && msg.content.toString().toLowerCase().includes('sofia')) {
+                                  shouldReply = true;
+                                }
                               }
                             }
-                          }
 
-                          if (!shouldReply) {
+                            if (!shouldReply) {
+                              await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
+                              this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
+                              return;
+                            }
+                          }
+                          let systemPrompt;
+                          if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
+                            let grpName = (await this.store?.contacts.id(msg.key.remoteJid))?.name || "Unknown Group Chat";
+                            systemPrompt = await this.ai.generatePrompt('group', grpName, msg.key.remoteJid);
+                          }
+                          else if (msg.key.remoteJidAlt) {
+                            const current_user = await this.db.user.getUserByJid(msg.key.remoteJidAlt)
+                            if (!current_user) {
+                              await this.sock!.sendMessage(msg.key.remoteJid!, { text: "Error: Unknown User. Please contact Azlan for access!" })
+                              await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
+                              this.logger.error(`Unknown user with jid ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
+                              return;
+                            }
+                            systemPrompt = await this.ai.generatePrompt('chat', current_user?.name, current_user?.id, current_user?.description)
+                          }
+                          else {
                             await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
-                            this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
+                            this.logger.error(`Unknown chat ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
                             return;
                           }
-                        }
-                        let systemPrompt;
-                        if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
-                          let grpName = (await this.store?.contacts.id(msg.key.remoteJid))?.name || "Unknown Group Chat";
-                          systemPrompt = await this.ai.generatePrompt('group', grpName, msg.key.remoteJid);
-                        }
-                        else if (msg.key.remoteJidAlt) {
-                          const current_user = await this.db.user.getUserByJid(msg.key.remoteJidAlt)
-                          if (!current_user) {
-                            await this.sock!.sendMessage(msg.key.remoteJid!, { text: "Error: Unknown User. Please contact Azlan for access!" })
-                            await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
-                            this.logger.error(`Unknown user with jid ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
-                            return;
-                          }
-                          systemPrompt = await this.ai.generatePrompt('chat', current_user?.name, current_user?.id, current_user?.description)
-                        }
-                        else {
-                          await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
-                          this.logger.error(`Unknown chat ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
-                          return;
-                        }
-                        let firstMsg = true;
-                        const streamGenerator = this.ai.processChatv3([{
-                          role: 'system',
-                          content: systemPrompt
-                        } as EasyInputMessage, ...(chatHistoryParsed as Array<ResponseInputItem>)]);
+                          let firstMsg = true;
+                          const streamGenerator = this.ai.processChatv3([{
+                            role: 'system',
+                            content: systemPrompt
+                          } as EasyInputMessage, ...(chatHistoryParsed as Array<ResponseInputItem>)]);
 
-                        const replyMsg: WAMessage = {
-                          message: {
-                            conversation: `I am an AI Agent`
-                          },
-                          key: {
-                            id: 'autoCmd' + Math.floor(process.uptime()),
-                            remoteJid: '120364402285813629@g.us', // Random Group ID, probably invalid,
-                            fromMe: false,
-                            participant: this.sock!.user?.lid,
-                          },
-                          messageTimestamp: Math.floor((new Date()).getTime() / 1000),
-                          pushName: 'Sofia',
-                          broadcast: false,
-                        };
+                          const replyMsg: WAMessage = {
+                            message: {
+                              conversation: `I am an AI Agent`
+                            },
+                            key: {
+                              id: 'autoCmd' + Math.floor(process.uptime()),
+                              remoteJid: '120364402285813629@g.us', // Random Group ID, probably invalid,
+                              fromMe: false,
+                              participant: this.sock!.user?.lid,
+                            },
+                            messageTimestamp: Math.floor((new Date()).getTime() / 1000),
+                            pushName: 'Sofia',
+                            broadcast: false,
+                          };
 
-                        // Consume the generator stream manually to control output
-                        for await (const yieldState of streamGenerator) {
-                          if (yieldState.type === 'chunk_display') {
-                            process.stdout.write(yieldState.content as string);
-                            if (yieldState.delimiter) {
-                              process.stdout.write("\n-------------------------------\n");
-                            }
-                            let newMsg;
-                            if (firstMsg) {
-                              newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string }, { quoted: replyMsg });
-                              firstMsg = false;
-                            }
-                            else {
-                              newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
-                            }
-                            lastMsgId = newMsg?.key.id as string | undefined;
-                            await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
-                          } else if (yieldState.type === 'done') {
-                            break; // Exit the loop after the full content is collected
-                          } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'reasoning') {
-                            if (!lastMsgId) {
-                              this.logger.error("ERROR: No Last Message ID, Tool call and reasoning data not saved!");
-                            }
-                            else {
-                              const newToolCallHist = await this.db.toolCallHist.create({
-                                id: undefined,
-                                whatsapp_chat: msg.key.remoteJidAlt || msg.key.remoteJid!,
-                                aftId: lastMsgId,
-                                data: (yieldState as any).data,
-                              })
-                              lastMsgId = newToolCallHist.id;
+                          // Consume the generator stream manually to control output
+                          for await (const yieldState of streamGenerator) {
+                            if (yieldState.type === 'chunk_display') {
+                              process.stdout.write(yieldState.content as string);
+                              if (yieldState.delimiter) {
+                                process.stdout.write("\n-------------------------------\n");
+                              }
+                              let newMsg;
+                              if (firstMsg) {
+                                newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string }, { quoted: replyMsg });
+                                firstMsg = false;
+                              }
+                              else {
+                                newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
+                              }
+                              lastMsgId = newMsg?.key.id as string | undefined;
+                              await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
+                            } else if (yieldState.type === 'done') {
+                              break; // Exit the loop after the full content is collected
+                            } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'reasoning') {
+                              if (!lastMsgId) {
+                                this.logger.error("ERROR: No Last Message ID, Tool call and reasoning data not saved!");
+                              }
+                              else {
+                                const newToolCallHist = await this.db.toolCallHist.create({
+                                  id: undefined,
+                                  whatsapp_chat: msg.key.remoteJidAlt || msg.key.remoteJid!,
+                                  aftId: lastMsgId,
+                                  data: (yieldState as any).data,
+                                })
+                                lastMsgId = newToolCallHist.id;
+                              }
                             }
                           }
                         }
-                      }
-                      await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
+                        await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
 
-                    }).bind(this));
-                  } else {
-                    this.logger.error('Error getting msg.key.remoteJid, value is null or undefined!');
+                      }).bind(this));
+                    } else {
+                      this.logger.error('Error getting msg.key.remoteJid, value is null or undefined!');
+                    }
+                  } catch (e) {
+                    this.logger.error(e);
                   }
                 }
               }
