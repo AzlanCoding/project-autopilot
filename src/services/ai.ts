@@ -451,7 +451,7 @@ export default class AI {
       this.model = new ChatOpenAI({
         apiKey: process.env.ALIBABA_API_KEY,
         // model: 'gpt-4o-mini',
-        model: 'qwen3.5-plus-2026-04-20',
+        model: 'qwen3.5-plus',
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
           baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -468,7 +468,7 @@ export default class AI {
     }
     this.bindModel();
 
-    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.5-plus-2026-04-20" }) => {
+    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.5-plus" }) => {
       // 1. Read the System Prompt from the file
       const systemPromptPath = path.resolve("src/static/prompts/system.md");
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
@@ -753,7 +753,7 @@ export default class AI {
   //       // The official client exposes a streaming helper `client.responses.stream`.
   //       // We pass `input` as the messages array.
   //       const stream = await instance.openai.responses.create({
-  //         model: "qwen3.5-plus-2026-04-20",
+  //         model: "qwen3.5-plus",
   //         input: openaiMessages,
   //         stream: true,
   //         tools: instance.tools.map((t) => ({
@@ -1003,7 +1003,7 @@ export default class AI {
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
         const stream = await instance.openai.responses.create({
-          model: "qwen3.5-plus-2026-04-20",
+          model: "qwen3.5-plus",
           input: chatHistory,
           stream: true,
           tools: instance.tools.map((t) => ({
