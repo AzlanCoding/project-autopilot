@@ -451,7 +451,7 @@ export default class AI {
       this.model = new ChatOpenAI({
         apiKey: process.env.ALIBABA_API_KEY,
         // model: 'gpt-4o-mini',
-        model: 'qwen3.5-plus',
+        model: 'qwen3.5-plus-2026-04-20',
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
           baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -468,17 +468,25 @@ export default class AI {
     }
     this.bindModel();
 
-    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.6-plus" }) => {
+    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.5-plus-2026-04-20" }) => {
       // 1. Read the System Prompt from the file
       const systemPromptPath = path.resolve("src/static/prompts/system.md");
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
-      const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavaliable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
-      Avaliable Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-      IMPORTANT: This chat is triggered automatically by the system due to a scheduled task. SEND YOUR REPLY USING THE send_message TOOL CALL ONLY! ONLY 1 USER MESSAGE WILL BE SENT! FOLLOW THE USER INSTRUCTIONS IMMEDIATELY! DO NOT ASK FOR CONFIRMATION!
+      const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavailable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
+      Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
+      IMPORTANT: This chat is triggered automatically by the system due to a scheduled task. MAKE SURE YOU SEND A REPLY USING THE send_message TOOL CALL! ONLY 1 USER MESSAGE WILL BE SENT! FOLLOW THE USER INSTRUCTIONS IMMEDIATELY! DO NOT ASK FOR CONFIRMATION!
       GROUP CHATS: ${await this.listGroupsTool!.func({})}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
-      const chatHistory: BaseMessage[] = [new SystemMessage(systemPrompt), new HumanMessage(await message())]
-      const streamGenerator = this.processChatv2(chatHistory, undefined, modelOptions);
+      const chatHistory: EasyInputMessage[] = [{
+        role: 'system',
+        content: systemPrompt,
+        type: 'message'
+      }, {
+        role: 'system',
+        content: await message(),
+        type: 'message'
+      }]
+      const streamGenerator = this.processChatv3(chatHistory, undefined, modelOptions);
       for await (const yieldState of streamGenerator) {
         if (yieldState.type === 'chunk_display') {
           this.logger.warn(`SCHEDULED TASK YIELDED CONTENT: ${yieldState.content as string}`);
@@ -492,405 +500,405 @@ export default class AI {
     }
   }
 
-  /**
-   * Asynchronously streams the model response, yielding control back to the caller
-   * periodically to allow for display control.
-   * @param userInput The message from the user.
-   * @param chatHistory The current list of messages for context.
-   * @yields A Promise that resolves when the response content is fully generated.
-   */
-  async * processChat(
-    chatHistory: BaseMessage[],
-    userInput?: string,
-  ) {
-    if (userInput) {
-      const userMessage = new HumanMessage(userInput);
-      chatHistory.push(userMessage);
-    }
+  // /**
+  //  * Asynchronously streams the model response, yielding control back to the caller
+  //  * periodically to allow for display control.
+  //  * @param userInput The message from the user.
+  //  * @param chatHistory The current list of messages for context.
+  //  * @yields A Promise that resolves when the response content is fully generated.
+  //  */
+  // async * processChat(
+  //   chatHistory: BaseMessage[],
+  //   userInput?: string,
+  // ) {
+  //   if (userInput) {
+  //     const userMessage = new HumanMessage(userInput);
+  //     chatHistory.push(userMessage);
+  //   }
 
-    // 🔧 Build tool registry (name → tool)
-    const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
-      this.tools.map(t => [t.name, t])
-    );
+  //   // 🔧 Build tool registry (name → tool)
+  //   const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
+  //     this.tools.map(t => [t.name, t])
+  //   );
 
-    try {
-      console.log("\n🤖 Thinking...");
+  //   try {
+  //     console.log("\n🤖 Thinking...");
 
-      const memory = await this.memoryQueryTool.func({ queryText: userInput })
-      if (memory instanceof Array && memory.length > 0) {
-        chatHistory.push(new SystemMessage(`Possibly relavent memory data: ${memory}`))
-      }
+  //     const memory = await this.memoryQueryTool.func({ queryText: userInput })
+  //     if (memory instanceof Array && memory.length > 0) {
+  //       chatHistory.push(new SystemMessage(`Possibly relavent memory data: ${memory}`))
+  //     }
 
-      let fullResponseContent = "";
-      let chunck = "";
+  //     let fullResponseContent = "";
+  //     let chunck = "";
 
-      // 🔁 Recursive stream handler
-      const handleStream = async function* (
-        stream: any,
-        model: ReturnType<ChatOpenAI['bindTools']>
-      ): AsyncGenerator<any> {
-        for await (const chunk of stream) {
+  //     // 🔁 Recursive stream handler
+  //     const handleStream = async function* (
+  //       stream: any,
+  //       model: ReturnType<ChatOpenAI['bindTools']>
+  //     ): AsyncGenerator<any> {
+  //       for await (const chunk of stream) {
 
-          // 🧠 TOOL CALL HANDLING (multi-call safe)
-          if (
-            chunk.tool_calls &&
-            chunk.tool_calls.length > 0 &&
-            chunk.tool_calls.every((tc: any) => tc.id)
-          ) {
-            const toolCalls = chunk.tool_calls;
+  //         // 🧠 TOOL CALL HANDLING (multi-call safe)
+  //         if (
+  //           chunk.tool_calls &&
+  //           chunk.tool_calls.length > 0 &&
+  //           chunk.tool_calls.every((tc: any) => tc.id)
+  //         ) {
+  //           const toolCalls = chunk.tool_calls;
 
-            // 1. Add AIMessage with all tool calls
-            chatHistory.push(
-              new AIMessage({
-                content: "",
-                tool_calls: toolCalls,
-              })
-            );
+  //           // 1. Add AIMessage with all tool calls
+  //           chatHistory.push(
+  //             new AIMessage({
+  //               content: "",
+  //               tool_calls: toolCalls,
+  //             })
+  //           );
 
-            // 2. Execute all tools
-            for (const toolCall of toolCalls) {
-              console.dir(toolCall);
-              console.log(`Called ${toolCall.name}`)
-              const tool = toolMap[toolCall.name];
+  //           // 2. Execute all tools
+  //           for (const toolCall of toolCalls) {
+  //             console.dir(toolCall);
+  //             console.log(`Called ${toolCall.name}`)
+  //             const tool = toolMap[toolCall.name];
 
-              let result: string;
+  //             let result: string;
 
-              try {
-                if (!tool) {
-                  result = `Error: Unknown tool "${toolCall.name}"`;
-                } else {
-                  // 🧩 Flush remaining buffer if there is. (e.g, AI says it will go get the information)
-                  if (chunck) {
-                    yield {
-                      type: "chunk_display",
-                      content: chunck,
-                      delimiter: false,
-                    };
-                    chunck = "";
-                  }
+  //             try {
+  //               if (!tool) {
+  //                 result = `Error: Unknown tool "${toolCall.name}"`;
+  //               } else {
+  //                 // 🧩 Flush remaining buffer if there is. (e.g, AI says it will go get the information)
+  //                 if (chunck) {
+  //                   yield {
+  //                     type: "chunk_display",
+  //                     content: chunck,
+  //                     delimiter: false,
+  //                   };
+  //                   chunck = "";
+  //                 }
 
-                  // parse args safely (if present)
-                  const args = toolCall.args ?? {};
-                  console.trace(args)
-                  result = await tool.invoke(args);
-                }
-              } catch (err: any) {
-                console.error(err);
-                result = `Tool execution error: ${err.message}\nToolArgs: ${tool.usage_str}`;
-              }
-              console.trace(result);
+  //                 // parse args safely (if present)
+  //                 const args = toolCall.args ?? {};
+  //                 console.trace(args)
+  //                 result = await tool.invoke(args);
+  //               }
+  //             } catch (err: any) {
+  //               console.error(err);
+  //               result = `Tool execution error: ${err.message}\nToolArgs: ${tool.usage_str}`;
+  //             }
+  //             console.trace(result);
 
-              chatHistory.push(
-                new ToolMessage({
-                  content: result,
-                  tool_call_id: toolCall.id!,
-                })
-              );
-            }
+  //             chatHistory.push(
+  //               new ToolMessage({
+  //                 content: result,
+  //                 tool_call_id: toolCall.id!,
+  //               })
+  //             );
+  //           }
 
-            // 3. Restart stream AFTER all tools complete
-            const followStream = await model.stream(chatHistory);
+  //           // 3. Restart stream AFTER all tools complete
+  //           const followStream = await model.stream(chatHistory);
 
-            yield* handleStream(followStream, model);
-            return; // stop current stream
-          }
+  //           yield* handleStream(followStream, model);
+  //           return; // stop current stream
+  //         }
 
-          // 📡 NORMAL STREAMING (unchanged)
-          const chunkText = (chunk.content || "") as string;
+  //         // 📡 NORMAL STREAMING (unchanged)
+  //         const chunkText = (chunk.content || "") as string;
 
-          fullResponseContent += chunkText;
-          chunck += chunkText;
+  //         fullResponseContent += chunkText;
+  //         chunck += chunkText;
 
-          if (chunck.includes("\n\n")) {
-            let text = chunck.slice(0, chunck.indexOf("\n\n"));
-            chunck = chunck.slice(chunck.indexOf("\n\n") + 2);
+  //         if (chunck.includes("\n\n")) {
+  //           let text = chunck.slice(0, chunck.indexOf("\n\n"));
+  //           chunck = chunck.slice(chunck.indexOf("\n\n") + 2);
 
-            yield {
-              type: "chunk_display",
-              content: text,
-              delimiter: true,
-            };
-          }
-        }
-      };
+  //           yield {
+  //             type: "chunk_display",
+  //             content: text,
+  //             delimiter: true,
+  //           };
+  //         }
+  //       }
+  //     };
 
-      // 🚀 Start initial stream
-      const initialStream = await this.model.stream(chatHistory);
+  //     // 🚀 Start initial stream
+  //     const initialStream = await this.model.stream(chatHistory);
 
-      for await (const yieldState of handleStream(initialStream, this.model)) {
-        yield yieldState;
-      }
+  //     for await (const yieldState of handleStream(initialStream, this.model)) {
+  //       yield yieldState;
+  //     }
 
-      // 🧩 Flush remaining buffer
-      if (chunck) {
-        yield {
-          type: "chunk_display",
-          content: chunck,
-          delimiter: false,
-        };
-      }
+  //     // 🧩 Flush remaining buffer
+  //     if (chunck) {
+  //       yield {
+  //         type: "chunk_display",
+  //         content: chunck,
+  //         delimiter: false,
+  //       };
+  //     }
 
-      // ✅ Persist final AI response
-      chatHistory.push(new AIMessage(fullResponseContent));
+  //     // ✅ Persist final AI response
+  //     chatHistory.push(new AIMessage(fullResponseContent));
 
-      yield {
-        type: "done",
-        content: chatHistory,
-      };
+  //     yield {
+  //       type: "done",
+  //       content: chatHistory,
+  //     };
 
-    } catch (error) {
-      console.error("\n🚨 Oops! Something went wrong:", error);
-      chatHistory.pop();
-      throw error;
-    }
-  }
-
-
-  /**
-   * Same behavior as the original processChat but implemented using the official OpenAI Node.js Responses streaming API.
-   *
-   * Notes / assumptions:
-   * - `this.openai` is an instance of `new OpenAI({ apiKey })`.
-   * - `this.modelName` is the model id to call (e.g., "gpt-4o-mini" or "gpt-4o").
-   * - `this.tools` is an array of ExtendedDynamicStructuredTool objects with `.name` and `.invoke(args)` (or `.invoke` signature).
-   * - `this.memoryQueryTool.func` exists and returns memory results for the given query.
-   * - `chatHistory` uses the same message classes as in the original code.
-   *
-   * Adjust imports and minor details to match your codebase.
-   */
-  async * processChatv2(
-    chatHistory: BaseMessage[],
-    userInput?: string,
-    additionalOptions: Partial<ResponseCreateParamsStreaming> = {}
-  ) {
-    // Add user message to history if provided
-    if (userInput) {
-      const userMessage = new HumanMessage(userInput);
-      chatHistory.push(userMessage);
-    }
-
-    // Build tool map for quick lookup
-    const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
-      this.tools.map((t: ExtendedDynamicStructuredTool) => [t.name, t])
-    );
-
-    try {
-      console.log("\n🤖 Thinking (v2 with official OpenAI client)...");
-
-      // Query memory and add a system hint if relevant
-      const memory = await this.memoryQueryTool.func({ queryText: userInput || chatHistory.filter(m => m instanceof HumanMessage).slice(-1)[0].content });
-      if (Array.isArray(memory) && memory.length > 0) {
-        chatHistory.push(new SystemMessage(`Possibly relevant memory data: ${memory}`));
-      }
-
-      // Convert chatHistory to the shape expected by the OpenAI Responses API
-      const buildMessagesForOpenAI: (history: BaseMessage[]) => Array<ResponseInputItem> = (history) =>
-        history.map((m) => {
-          // Map your message classes to role/content pairs
-          if (m instanceof HumanMessage) {
-            return { role: "user", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
-          }
-          if (m instanceof AIMessage) {
-            if (m.tool_calls) {
-              for (let i = 0; i < m.tool_calls.length; i++) {
-                return {
-                  call_id: (m.tool_calls[i] as any).id,
-                  arguments: (m.tool_calls[i] as any).args instanceof String ? (m.tool_calls[i] as any).args : JSON.stringify((m.tool_calls[i] as any).args),
-                  name: (m.tool_calls[i] as any).name, type: 'function_call'
-                } as ResponseFunctionToolCall
-              }
-            }
-            else {
-              return { role: "assistant", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
-            }
-          }
-          if (m instanceof SystemMessage) {
-            return { role: "system", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
-          }
-          if (m instanceof ToolMessage) {
-            // ToolMessage is treated as assistant content (tool output)
-            return { output: m.content, call_id: m.tool_call_id || m.id, type: "function_call_output" } as ResponseInputItem.FunctionCallOutput;
-          }
-          // Fallback
-          return { role: "assistant", content: ((m as any).content ?? "") as string, type: "message" } as EasyInputMessage;
-        });
+  //   } catch (error) {
+  //     console.error("\n🚨 Oops! Something went wrong:", error);
+  //     chatHistory.pop();
+  //     throw error;
+  //   }
+  // }
 
 
-      // We'll accumulate the full assistant text and a small buffer for chunked yields
-      let fullResponseContent = "";
-      let buffer = "";
+  // /**
+  //  * Same behavior as the original processChat but implemented using the official OpenAI Node.js Responses streaming API.
+  //  *
+  //  * Notes / assumptions:
+  //  * - `this.openai` is an instance of `new OpenAI({ apiKey })`.
+  //  * - `this.modelName` is the model id to call (e.g., "gpt-4o-mini" or "gpt-4o").
+  //  * - `this.tools` is an array of ExtendedDynamicStructuredTool objects with `.name` and `.invoke(args)` (or `.invoke` signature).
+  //  * - `this.memoryQueryTool.func` exists and returns memory results for the given query.
+  //  * - `chatHistory` uses the same message classes as in the original code.
+  //  *
+  //  * Adjust imports and minor details to match your codebase.
+  //  */
+  // async * processChatv2(
+  //   chatHistory: BaseMessage[],
+  //   userInput?: string,
+  //   additionalOptions: Partial<ResponseCreateParamsStreaming> = {}
+  // ) {
+  //   // Add user message to history if provided
+  //   if (userInput) {
+  //     const userMessage = new HumanMessage(userInput);
+  //     chatHistory.push(userMessage);
+  //   }
 
-      // Helper to flush buffer as chunk_display
-      const flushBuffer = (delimiter: boolean) => {
-        if (!buffer) return null;
-        const out = {
-          type: "chunk_display",
-          content: buffer,
-          delimiter,
-        };
-        buffer = "";
-        return out;
-      };
+  //   // Build tool map for quick lookup
+  //   const toolMap: Record<string, ExtendedDynamicStructuredTool> = Object.fromEntries(
+  //     this.tools.map((t: ExtendedDynamicStructuredTool) => [t.name, t])
+  //   );
 
-      const handleStream = async function* (instance: AI): AsyncGenerator<{
-        type: string,
-        content: string,
-        delimiter: boolean
-      }> {
-        instance.logger.trace("CALL START")
-        let hasToolCalls = false;
-        const openaiMessages = buildMessagesForOpenAI(chatHistory);
-        instance.logger.trace(openaiMessages);
-        // Start streaming from the Responses API
-        // The official client exposes a streaming helper `client.responses.stream`.
-        // We pass `input` as the messages array.
-        const stream = await instance.openai.responses.create({
-          model: "qwen3.5-plus",
-          input: openaiMessages,
-          stream: true,
-          tools: instance.tools.map((t) => ({
-            type: "function",
-            name: t.name,
-            description: t.description,
-            parameters: z.toJSONSchema(t.schema as any, {
-              target: 'draft-7',
-            }),
-            strict: true
-          })),
-          tool_choice: "auto",
-          // You can pass additional options here (e.g., temperature) if desired
-          ...additionalOptions
-        });
+  //   try {
+  //     console.log("\n🤖 Thinking (v2 with official OpenAI client)...");
 
-        for await (const event of stream) {
-          instance.logger.trace(event);
-          if (event.type == "response.output_item.done") {
-            if (event.item.type == "function_call") {
-              hasToolCalls = true;
-              let args;
-              try {
-                args = JSON.parse(event.item.arguments) || {}
-              }
-              catch {
-                args = `${event.item.arguments}`
-              }
-              chatHistory.push(
-                new AIMessage({
-                  content: "",
-                  tool_calls: [{
-                    type: "tool_call",
-                    id: event.item.call_id,
-                    name: event.item.name,
-                    args
-                  }],
-                })
-              );
+  //     // Query memory and add a system hint if relevant
+  //     const memory = await this.memoryQueryTool.func({ queryText: userInput || chatHistory.filter(m => m instanceof HumanMessage).slice(-1)[0].content });
+  //     if (Array.isArray(memory) && memory.length > 0) {
+  //       chatHistory.push(new SystemMessage(`Possibly relevant memory data: ${memory}`));
+  //     }
 
-              console.dir(event.item)
-              console.log(`Called ${event.item.name}`)
-              const tool = toolMap[event.item.name];
-              let result: string;
-              try {
-                if (!tool) {
-                  result = `Error: Unknown tool "${event.item.name}"`;
-                } else {
-
-                  if (buffer) {
-                    yield {
-                      type: "chunk_display",
-                      content: buffer,
-                      delimiter: false,
-                    };
-                    buffer = "";
-                  }
-
-                  // parse args safely (if present)
-                  const args2 = JSON.parse(event.item.arguments) ?? {};
-                  console.trace(args2)
-                  result = await tool.invoke(args2);
-
-                }
-
-              }
-              catch (err: any) {
-                console.error(err);
-                result = `Tool execution error:${err.message}\nToolArgs: ${tool.usage_str}`;
-              }
-              console.trace(result);
-
-              chatHistory.push(
-                new ToolMessage({
-                  content: result,
-                  tool_call_id: event.item.call_id,
-                })
-              )
-
-            }
-          }
-          else if (event.type == "response.output_text.delta") {
-            // 📡 NORMAL STREAMING (unchanged)
-            const chunkText = (event.delta || "") as string;
-            fullResponseContent += chunkText;
-            buffer += chunkText;
-
-            if (buffer.includes("\n\n")) {
-              let text = buffer.slice(0, buffer.indexOf("\n\n"));
-              buffer = buffer.slice(buffer.indexOf("\n\n") + 2);
-
-              yield {
-                type: "chunk_display",
-                content: text,
-                delimiter: true,
-              };
-            }
-          }
-        }
-
-        if (hasToolCalls) {
-          instance.logger.trace("RECALLING!!!")
-          yield* handleStream(instance);
-          return;
-        }
-
-      }
-
-      for await (const event of handleStream(this)) {
-        yield event;
-      }
+  //     // Convert chatHistory to the shape expected by the OpenAI Responses API
+  //     const buildMessagesForOpenAI: (history: BaseMessage[]) => Array<ResponseInputItem> = (history) =>
+  //       history.map((m) => {
+  //         // Map your message classes to role/content pairs
+  //         if (m instanceof HumanMessage) {
+  //           return { role: "user", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+  //         }
+  //         if (m instanceof AIMessage) {
+  //           if (m.tool_calls) {
+  //             for (let i = 0; i < m.tool_calls.length; i++) {
+  //               return {
+  //                 call_id: (m.tool_calls[i] as any).id,
+  //                 arguments: (m.tool_calls[i] as any).args instanceof String ? (m.tool_calls[i] as any).args : JSON.stringify((m.tool_calls[i] as any).args),
+  //                 name: (m.tool_calls[i] as any).name, type: 'function_call'
+  //               } as ResponseFunctionToolCall
+  //             }
+  //           }
+  //           else {
+  //             return { role: "assistant", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+  //           }
+  //         }
+  //         if (m instanceof SystemMessage) {
+  //           return { role: "system", content: (m.content ?? "") as string, type: "message" } as EasyInputMessage;
+  //         }
+  //         if (m instanceof ToolMessage) {
+  //           // ToolMessage is treated as assistant content (tool output)
+  //           return { output: m.content, call_id: m.tool_call_id || m.id, type: "function_call_output" } as ResponseInputItem.FunctionCallOutput;
+  //         }
+  //         // Fallback
+  //         return { role: "assistant", content: ((m as any).content ?? "") as string, type: "message" } as EasyInputMessage;
+  //       });
 
 
+  //     // We'll accumulate the full assistant text and a small buffer for chunked yields
+  //     let fullResponseContent = "";
+  //     let buffer = "";
 
-      // 🧩 Flush remaining buffer
-      if (buffer) {
-        yield {
-          type: "chunk_display",
-          content: buffer,
-          delimiter: false,
-        };
-      }
+  //     // Helper to flush buffer as chunk_display
+  //     const flushBuffer = (delimiter: boolean) => {
+  //       if (!buffer) return null;
+  //       const out = {
+  //         type: "chunk_display",
+  //         content: buffer,
+  //         delimiter,
+  //       };
+  //       buffer = "";
+  //       return out;
+  //     };
 
-      // Persist final AI response into chatHistory
-      chatHistory.push(new AIMessage(fullResponseContent));
+  //     const handleStream = async function* (instance: AI): AsyncGenerator<{
+  //       type: string,
+  //       content: string,
+  //       delimiter: boolean
+  //     }> {
+  //       instance.logger.trace("CALL START")
+  //       let hasToolCalls = false;
+  //       const openaiMessages = buildMessagesForOpenAI(chatHistory);
+  //       instance.logger.trace(openaiMessages);
+  //       // Start streaming from the Responses API
+  //       // The official client exposes a streaming helper `client.responses.stream`.
+  //       // We pass `input` as the messages array.
+  //       const stream = await instance.openai.responses.create({
+  //         model: "qwen3.5-plus-2026-04-20",
+  //         input: openaiMessages,
+  //         stream: true,
+  //         tools: instance.tools.map((t) => ({
+  //           type: "function",
+  //           name: t.name,
+  //           description: t.description,
+  //           parameters: z.toJSONSchema(t.schema as any, {
+  //             target: 'draft-7',
+  //           }),
+  //           strict: true
+  //         })),
+  //         tool_choice: "auto",
+  //         // You can pass additional options here (e.g., temperature) if desired
+  //         ...additionalOptions
+  //       });
 
-      // Return final chatHistory
-      yield {
-        type: "done",
-        content: chatHistory,
-        delimiter: false
-      };
-    } catch (error) {
-      console.error("\n🚨 Oops! Something went wrong (v2):", error);
-      // If we added the user's message at the top and want to revert it on error, pop it
-      if (userInput) {
-        // remove last message if it matches the user input
-        const last = chatHistory[chatHistory.length - 1];
-        if (last instanceof HumanMessage && last.content === userInput) {
-          chatHistory.pop();
-        }
-      }
-      throw error;
-    }
-  }
+  //       for await (const event of stream) {
+  //         instance.logger.trace(event);
+  //         if (event.type == "response.output_item.done") {
+  //           if (event.item.type == "function_call") {
+  //             hasToolCalls = true;
+  //             let args;
+  //             try {
+  //               args = JSON.parse(event.item.arguments) || {}
+  //             }
+  //             catch {
+  //               args = `${event.item.arguments}`
+  //             }
+  //             chatHistory.push(
+  //               new AIMessage({
+  //                 content: "",
+  //                 tool_calls: [{
+  //                   type: "tool_call",
+  //                   id: event.item.call_id,
+  //                   name: event.item.name,
+  //                   args
+  //                 }],
+  //               })
+  //             );
+
+  //             console.dir(event.item)
+  //             console.log(`Called ${event.item.name}`)
+  //             const tool = toolMap[event.item.name];
+  //             let result: string;
+  //             try {
+  //               if (!tool) {
+  //                 result = `Error: Unknown tool "${event.item.name}"`;
+  //               } else {
+
+  //                 if (buffer) {
+  //                   yield {
+  //                     type: "chunk_display",
+  //                     content: buffer,
+  //                     delimiter: false,
+  //                   };
+  //                   buffer = "";
+  //                 }
+
+  //                 // parse args safely (if present)
+  //                 const args2 = JSON.parse(event.item.arguments) ?? {};
+  //                 console.trace(args2)
+  //                 result = await tool.invoke(args2);
+
+  //               }
+
+  //             }
+  //             catch (err: any) {
+  //               console.error(err);
+  //               result = `Tool execution error:${err.message}\nToolArgs: ${tool.usage_str}`;
+  //             }
+  //             console.trace(result);
+
+  //             chatHistory.push(
+  //               new ToolMessage({
+  //                 content: result,
+  //                 tool_call_id: event.item.call_id,
+  //               })
+  //             )
+
+  //           }
+  //         }
+  //         else if (event.type == "response.output_text.delta") {
+  //           // 📡 NORMAL STREAMING (unchanged)
+  //           const chunkText = (event.delta || "") as string;
+  //           fullResponseContent += chunkText;
+  //           buffer += chunkText;
+
+  //           if (buffer.includes("\n\n")) {
+  //             let text = buffer.slice(0, buffer.indexOf("\n\n"));
+  //             buffer = buffer.slice(buffer.indexOf("\n\n") + 2);
+
+  //             yield {
+  //               type: "chunk_display",
+  //               content: text,
+  //               delimiter: true,
+  //             };
+  //           }
+  //         }
+  //       }
+
+  //       if (hasToolCalls) {
+  //         instance.logger.trace("RECALLING!!!")
+  //         yield* handleStream(instance);
+  //         return;
+  //       }
+
+  //     }
+
+  //     for await (const event of handleStream(this)) {
+  //       yield event;
+  //     }
+
+
+
+  //     // 🧩 Flush remaining buffer
+  //     if (buffer) {
+  //       yield {
+  //         type: "chunk_display",
+  //         content: buffer,
+  //         delimiter: false,
+  //       };
+  //     }
+
+  //     // Persist final AI response into chatHistory
+  //     chatHistory.push(new AIMessage(fullResponseContent));
+
+  //     // Return final chatHistory
+  //     yield {
+  //       type: "done",
+  //       content: chatHistory,
+  //       delimiter: false
+  //     };
+  //   } catch (error) {
+  //     console.error("\n🚨 Oops! Something went wrong (v2):", error);
+  //     // If we added the user's message at the top and want to revert it on error, pop it
+  //     if (userInput) {
+  //       // remove last message if it matches the user input
+  //       const last = chatHistory[chatHistory.length - 1];
+  //       if (last instanceof HumanMessage && last.content === userInput) {
+  //         chatHistory.pop();
+  //       }
+  //     }
+  //     throw error;
+  //   }
+  // }
 
   async * processChatv3(
     chatHistory: Array<ResponseInputItem>,
@@ -989,14 +997,13 @@ export default class AI {
         type: 'tool_call_output',
         data: ResponseInputItem.FunctionCallOutput
       }> {
-        instance.logger.trace("CHAT CALL START")
         let hasToolCalls = false;
-        instance.logger.trace(chatHistory, "CHAT HISTORY CREATED");
+        instance.logger.info(chatHistory, "CHAT HISTORY CREATED");
         // Start streaming from the Responses API
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
         const stream = await instance.openai.responses.create({
-          model: "qwen3.5-plus",
+          model: "qwen3.5-plus-2026-04-20",
           input: chatHistory,
           stream: true,
           tools: instance.tools.map((t) => ({
@@ -1050,7 +1057,7 @@ export default class AI {
               }
 
               console.dir(event.item)
-              console.log(`Called ${event.item.name}`)
+              instance.logger.info(`Called ${event.item.name}`)
               const tool = toolMap[event.item.name];
               let result: string;
               try {
@@ -1195,124 +1202,124 @@ export default class AI {
     const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
     User Memories: ${JSON.parse(memories).data.filter((m: any) => m.category != 'core').slice(-10).map((m: any) => m.text).join(';')}
     If you have no memory of saying hi to this user for the first time, please use the \`memory_write\` tool call to save this event (leave category empty) and then introduce yourself to the user.`}
-    Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (GIFs and Stickers unavaliable in this mode)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
+    Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (GIFs and Stickers unavailable in this mode)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
-    Avaliable Tool Calls: ${this.tools.map(t => t.name).join(', ')}
+    Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.
     Additionally, before using the \`send_message\` tool call, make sure to show the user what message you're sending.`
-    // Avaliable Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
+    // Available Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }
 
-  async shouldRespond(history: ResponseInputItem[]) {
-    if (history.length == 0) {
-      return false
-    };
-    const messages = (history.filter(m => m.type == 'message') as EasyInputMessage[]).map(m => m.role == 'assistant' ? `AI: ${m.content}` : `User: ${m.content}`).join('\n\n');
-    const model = new ChatOpenAI({
-      apiKey: process.env.ALIBABA_API_KEY,
-      model: 'qwen-flash',
-      configuration: {
-        // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      }
-    }).withStructuredOutput(z.object({
-      shouldRespond: z.boolean().describe("Whether or not the AI model Sofia should reply or not.")
-    }))
-    const systemMsg = `You determine whether an AI named Sofia should respond.
-Rules:
-- Respond if any of the recent messages is a question or asking her to do something or asking her a question. 
-- Respond If the user is following up on a previous statement and its appropriate for Sofia to reply.
-- Respond if it is appropriate to comment.
-- Other than that, do not respond.
-Examples when you should not respond:
-- "Sofia will be able to send GIFs and Stickers."
-- "I've added a new feature to sofia."
-- "I've just fixed some bugs with sofia."
-Examples when you should respond:
-- "Sofia, this is amazing isn't it?"
-- "I think sofia might know."
-- "Sofia, you're a genius!"
-- "Maybe sofia can help think of smt..."
-- "Sofia, what is the timetable for tomorrow."
-- "Sofia can you play a game with me?"
-- "Sofia create a new assignment with the information above."
-- "Sofia, can you help me check what assessments we have soon?" 
-`
-    const userMsg = `This is the current Chat History:\n${messages}\nShould AI model Sofia reply?`
-    const output = await model.invoke([new SystemMessage(systemMsg), new HumanMessage(userMsg)]);
-    return output.shouldRespond;
-  }
+  //   async shouldRespond(history: ResponseInputItem[]) {
+  //     if (history.length == 0) {
+  //       return false
+  //     };
+  //     const messages = (history.filter(m => m.type == 'message') as EasyInputMessage[]).map(m => m.role == 'assistant' ? `AI: ${m.content}` : `User: ${m.content}`).join('\n\n');
+  //     const model = new ChatOpenAI({
+  //       apiKey: process.env.ALIBABA_API_KEY,
+  //       model: 'qwen-flash',
+  //       configuration: {
+  //         // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+  //         baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  //       }
+  //     }).withStructuredOutput(z.object({
+  //       shouldRespond: z.boolean().describe("Whether or not the AI model Sofia should reply or not.")
+  //     }))
+  //     const systemMsg = `You determine whether an AI named Sofia should respond.
+  // Rules:
+  // - Respond if any of the recent messages is a question or asking her to do something or asking her a question. 
+  // - Respond If the user is following up on a previous statement and its appropriate for Sofia to reply.
+  // - Respond if it is appropriate to comment.
+  // - Other than that, do not respond.
+  // Examples when you should not respond:
+  // - "Sofia will be able to send GIFs and Stickers."
+  // - "I've added a new feature to sofia."
+  // - "I've just fixed some bugs with sofia."
+  // Examples when you should respond:
+  // - "Sofia, this is amazing isn't it?"
+  // - "I think sofia might know."
+  // - "Sofia, you're a genius!"
+  // - "Maybe sofia can help think of smt..."
+  // - "Sofia, what is the timetable for tomorrow."
+  // - "Sofia can you play a game with me?"
+  // - "Sofia create a new assignment with the information above."
+  // - "Sofia, can you help me check what assessments we have soon?" 
+  // `
+  //     const userMsg = `This is the current Chat History:\n${messages}\nShould AI model Sofia reply?`
+  //     const output = await model.invoke([new SystemMessage(systemMsg), new HumanMessage(userMsg)]);
+  //     return output.shouldRespond;
+  //   }
 
-  async run() {
+  // async run() {
 
-    // Chat history will store all messages for context persistence
-    let chatHistory: BaseMessage[] = [];
+  //   // Chat history will store all messages for context persistence
+  //   let chatHistory: BaseMessage[] = [];
 
-    try {
+  //   try {
 
 
-      // 3. Initialize Conversation History with the System Message (and current time)
-      const systemMsg = new SystemMessage(await this.generatePrompt('testing', "94527fcc-fff4-4994-af46-0fea45499f20", "Azlan"));
-      chatHistory.push(systemMsg);
-      console.log(systemMsg.content);
+  //     // 3. Initialize Conversation History with the System Message (and current time)
+  //     const systemMsg = new SystemMessage(await this.generatePrompt('testing', "94527fcc-fff4-4994-af46-0fea45499f20", "Azlan"));
+  //     chatHistory.push(systemMsg);
+  //     console.log(systemMsg.content);
 
-      // --- Readline Implementation for Continuous Chat ---
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-      });
+  //     // --- Readline Implementation for Continuous Chat ---
+  //     const rl = readline.createInterface({
+  //       input: process.stdin,
+  //       output: process.stdout
+  //     });
 
-      console.log("\n=============================================================================");
-      console.log("👋 Hi there! I'm Sofia, your AI class assistant!");
-      console.log("Feel free to chat with me about anything—academics, vibes, life stuff! 😊");
-      console.log("Type 'exit' or 'quit' when you're done.");
-      console.log("=========================================================================\n");
+  //     console.log("\n=============================================================================");
+  //     console.log("👋 Hi there! I'm Sofia, your AI class assistant!");
+  //     console.log("Feel free to chat with me about anything—academics, vibes, life stuff! 😊");
+  //     console.log("Type 'exit' or 'quit' when you're done.");
+  //     console.log("=========================================================================\n");
 
-      // Function to handle the entire chat loop
-      const chatLoop = async () => {
-        // Prompt user for the next input
-        rl.question('You: ', async (userInput: string) => {
-          if (userInput.toLowerCase() === 'exit' || userInput.toLowerCase() === 'quit') {
-            console.log("\n✨ Take care! Chatting with you was so much fun. Feel free to reach out anytime! ✨");
-            rl.close();
-            return;
-          }
+  //     // Function to handle the entire chat loop
+  //     const chatLoop = async () => {
+  //       // Prompt user for the next input
+  //       rl.question('You: ', async (userInput: string) => {
+  //         if (userInput.toLowerCase() === 'exit' || userInput.toLowerCase() === 'quit') {
+  //           console.log("\n✨ Take care! Chatting with you was so much fun. Feel free to reach out anytime! ✨");
+  //           rl.close();
+  //           return;
+  //         }
 
-          try {
-            const streamGenerator = this.processChatv2(chatHistory, userInput);
+  //         try {
+  //           const streamGenerator = this.processChatv2(chatHistory, userInput);
 
-            // 3. Consume the generator stream manually to control output
-            for await (const yieldState of streamGenerator) {
-              if (yieldState.type === 'chunk_display') {
-                process.stdout.write(yieldState.content as string);
-                if (yieldState.delimiter) {
-                  process.stdout.write("\n-------------------------------\n");
-                }
-              } else if (yieldState.type === 'done') {
-                chatHistory = yieldState.content as typeof chatHistory;
-                break; // Exit the loop after the full content is collected
-              }
-            }
+  //           // 3. Consume the generator stream manually to control output
+  //           for await (const yieldState of streamGenerator) {
+  //             if (yieldState.type === 'chunk_display') {
+  //               process.stdout.write(yieldState.content as string);
+  //               if (yieldState.delimiter) {
+  //                 process.stdout.write("\n-------------------------------\n");
+  //               }
+  //             } else if (yieldState.type === 'done') {
+  //               chatHistory = yieldState.content as typeof chatHistory;
+  //               break; // Exit the loop after the full content is collected
+  //             }
+  //           }
 
-          } catch (error) {
-            // Error is already logged inside processChat
-          } finally {
-            // Recursively call chatLoop to keep the conversation going
-            chatLoop();
-          }
-        });
-      };
+  //         } catch (error) {
+  //           // Error is already logged inside processChat
+  //         } finally {
+  //           // Recursively call chatLoop to keep the conversation going
+  //           chatLoop();
+  //         }
+  //       });
+  //     };
 
-      chatLoop();
+  //     chatLoop();
 
-    } catch (error) {
-      if (error instanceof Error) {
-        console.error("\nFATAL SETUP ERROR:", error.message);
-        console.error("Please ensure you have read permissions for the system prompt file: src/static/prompts/system.md");
-      } else {
-        console.error("\nFATAL ERROR:", error);
-      }
-    }
-  }
+  //   } catch (error) {
+  //     if (error instanceof Error) {
+  //       console.error("\nFATAL SETUP ERROR:", error.message);
+  //       console.error("Please ensure you have read permissions for the system prompt file: src/static/prompts/system.md");
+  //     } else {
+  //       console.error("\nFATAL ERROR:", error);
+  //     }
+  //   }
+  // }
 }

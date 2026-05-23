@@ -81,6 +81,10 @@ export class BufferSystem {
     if (!this.chatBuffers[id]) {
       return;
     }
+    else if (this.chatBuffers[id].status == 'RUNNING') {
+      this.logger.info("Buffer already running, will not resume. Exiting for " + id);
+      return;
+    }
     this.logger.info("Buffer resumed for " + id);
     if (this.chatBuffers[id].timeout) {
       clearTimeout(this.chatBuffers[id].timeout);
