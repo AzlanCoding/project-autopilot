@@ -482,8 +482,8 @@ export default class AI {
         content: systemPrompt,
         type: 'message'
       }, {
-        role: 'system',
-        content: await message(),
+        role: 'user',
+        content: (await message()),
         type: 'message'
       }]
       const streamGenerator = this.processChatv3(chatHistory, undefined, modelOptions);
@@ -1179,6 +1179,7 @@ export default class AI {
       };
     } catch (error) {
       console.error("\n🚨 Oops! Something went wrong (v3):", error);
+      this.logger.error(error)
       // If we added the user's message at the top and want to revert it on error, pop it
       if (userInput) {
         // remove last message if it matches the user input
