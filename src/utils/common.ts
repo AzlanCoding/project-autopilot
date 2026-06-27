@@ -76,3 +76,38 @@ export function convertHoursToReadableTime(totalHours: number) {
 
   return parts.length > 0 ? parts.join(', ') : '0 hours';
 }
+
+export function WK_Number_to_timeframe(week_num: number): string {
+  if (week_num <= 0) {
+    return "Invalid Week Number"
+  }
+  return `Week ${week_num} starts from ${moment('2026-04-20').add(week_num - 1, 'weeks').format('DD/MM/YYYY, ddd')} to ${moment('2026-04-26').add(week_num - 1, 'weeks').format('DD/MM/YYYY, ddd')}.` + (
+    week_num >= 18 ? " This week is also part of a semester break." :
+      week_num == 9 || week_num == 10 ? " This week is also part of a term break." : ""
+  )
+}
+
+/**
+ * Given an ISO date string (YYYY-MM-DD), returns the corresponding week number
+ * relative to the reference start date used in {@link WK_Number_to_timeframe}.
+ * The reference start date is 2026-04-20, which represents Week 1. Weeks are
+ * considered Monday‑to‑Sunday intervals. Written by GPT-oss 20B
+ *
+ * @param isoDate - ISO formatted date string (YYYY-MM-DD)
+ * @returns week number as a positive integer; returns 0 if the date is before the reference start date.
+ */
+export function getWeekNumberFromDate(isoDate: string): number {
+  const target = moment(isoDate, 'YYYY-MM-DD', true);
+  if (!target.isValid()) {
+    throw new Error('Invalid ISO date format. Expected YYYY-MM-DD');
+  }
+
+  // Reference start of Week 1
+  const referenceStart = moment('2026-04-20');
+  const diffDays = target.diff(referenceStart, 'days');
+  if (diffDays < 0) {
+    return 0;
+  }
+  // Math.floor handles positive integers correctly
+  return Math.floor(diffDays / 7) + 1;
+}

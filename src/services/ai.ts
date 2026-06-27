@@ -14,7 +14,7 @@ import { z } from "zod";
 import { OpenAI } from "openai";
 // import { ChatOllama } from '@langchain/ollama'
 import Store from './store';
-import { formatDateTime, getTime, parseTimestamp } from '../utils/common';
+import { formatDateTime, getTime, getWeekNumberFromDate, parseTimestamp, WK_Number_to_timeframe } from '../utils/common';
 import { User } from '../models/User';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
@@ -76,6 +76,10 @@ export default class AI {
   // WhatsApp Specific Tools will be added later on runtime
   sendMessageTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
+
+  // Week Tools
+  weekNumToDateTool: ExtendedDynamicStructuredTool;
+  dateToWeekNumTool: ExtendedDynamicStructuredTool;
 
   tools: ExtendedDynamicStructuredTool[];
 
@@ -421,7 +425,34 @@ export default class AI {
         const { date = undefined } = args as any;
         return (await getCalendarEvents(true, date)) || "No events found for the specified date.";
       }
-    }, "{date?:string}")
+    }, "{date?:string}");
+
+
+    // Week Tools
+    this.weekNumToDateTool = new ExtendedDynamicStructuredTool({
+      name: "week_number_to_date_range",
+      description: "Translates a Week Number into a range of dates",
+      schema: z.object({
+        week_num: z.number().describe("The week number.")
+      }),
+      func: async (args) => {
+        const { week_num } = args as any;
+        return WK_Number_to_timeframe(week_num);
+      }
+    }, "{week_num: number}");
+
+    this.dateToWeekNumTool = new ExtendedDynamicStructuredTool({
+      name: "date_to_week_num_tool",
+      description: "Gets the week number from a given date",
+      schema: z.object({
+        date: z.string().describe("The date as ISO 8601, e.g, 2007-12-27")
+      }),
+      func: async (args) => {
+        const { date } = args as any;
+        const weekNum = getWeekNumberFromDate(date);
+        return `${date} is in Week ${weekNum}. ${WK_Number_to_timeframe(weekNum)}`
+      }
+    }, "{date: string}")
 
 
     // Register tools (order doesn't matter)
@@ -432,7 +463,8 @@ export default class AI {
       this.assessmentCreateTool/*, this.assessmentGetTool*/, this.assessmentListTool, this.assessmentUpdateTool, this.assessmentDeleteTool,
       this.userListTool,
       this.stickerGifTool, this.sendStickerGifTool,
-      this.timetableTool
+      this.timetableTool,
+      this.weekNumToDateTool, this.dateToWeekNumTool
     ];
 
     // Model Setup (Keep Ollama/OpenAI context)
