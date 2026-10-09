@@ -10,6 +10,7 @@ import { Cron } from "croner";
 
 const main = async () => {
 
+  console.log(`[${new Date().toISOString()}] Starting Sofia...`);
   const logger = createLogger();
   const db = new Store(logger);
 
@@ -74,4 +75,8 @@ const main = async () => {
   // eval_cmd();
 }
 
-main().catch(console.error);
+main().catch(e => {
+  // Exit so `restart: unless-stopped` retries, e.g. when Milvus is not ready yet, instead of hanging with open connections.
+  console.error(`[${new Date().toISOString()}] Sofia failed to start:`, e);
+  process.exit(1);
+});

@@ -22,6 +22,7 @@ import type { PreProccessChatMsg } from './botService';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
+import { MODELSTUDIO_BASE_URL } from '../config/modelStudio';
 
 // Alibaba Model Studio model used for chats and scheduled tasks
 export const CHAT_MODEL = process.env.CHAT_MODEL || 'qwen3.8-flash';
@@ -63,7 +64,7 @@ export default class AI {
     {
       apiKey: process.env.ALIBABA_API_KEY,
       // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      baseURL: MODELSTUDIO_BASE_URL
     }
   );
 
@@ -650,7 +651,7 @@ export default class AI {
         model: CHAT_MODEL,
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-          baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+          baseURL: MODELSTUDIO_BASE_URL
         }
       }).bindTools(this.tools)
       // this.model = new ChatOllama({

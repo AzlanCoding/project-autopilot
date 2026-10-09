@@ -44,10 +44,10 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
     
   
 ## Running
-*   `pnpm run run` builds and starts the bot. Set `CHAT_MODEL` in `.env` to change the Alibaba Model Studio model (defaults to `qwen3.8-flash`).
-*   `pnpm test` runs the unit tests.
+*   `pnpm run run` builds and starts the bot. Set `CHAT_MODEL` in `.env` to change the Alibaba Model Studio model (defaults to `qwen3.8-flash`). Set `MODELSTUDIO_WORKSPACE_URL` to your workspace's OpenAI compatible URL (e.g. `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`), it is needed for the decision model that decides when Sofia replies in group chats.
+*   `pnpm test` runs the unit tests. `LIVE_TESTS=true pnpm test` also runs hand written group chats against the real decision model to check when Sofia replies (`tests/replyDecision.test.ts`).
 *   `pnpm cli --seed tests/seed.example.json --user Azlan --allow-writes` chats with Sofia in the terminal without WhatsApp. `send_message`, `list_groups` and `read_chat_history` use an in-memory mock, everything else is real, so point `SQL_DATABASE_URL` and `MILVUS_ADDRESS` at a test database when using `--allow-writes`. Lines can be piped in through stdin to script a conversation. See `cli.ts` for commands.
-*   Docker: `docker compose up -d --build` starts Milvus and the bot (the bot waits 45 seconds for Milvus first), then scan the QR code from `docker compose logs -f sofia`. Everything restarts unless stopped. `.env` and `assets/` are mounted into the container.
+*   Docker: `docker compose up -d --build` starts Milvus and the bot (if Milvus is not ready yet, the bot exits and Docker restarts it), then scan the QR code from `docker compose logs -f sofia`. Everything restarts unless stopped. `.env` and `assets/` are mounted into the container.
 
 
 ## TODO

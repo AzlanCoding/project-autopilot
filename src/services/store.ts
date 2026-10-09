@@ -17,6 +17,7 @@ import { ToolCallHistService } from './ToolCallHistService';
 import { ToolCallHist } from '../models/ToolCallHist';
 import { ScheduledTaskService } from './scheduledTaskService';
 import { ScheduledTask } from '../models/ScheduledTask';
+import { MODELSTUDIO_BASE_URL } from '../config/modelStudio';
 
 const SETTINGS_PATH = './assets/settings.json';
 // Shown to the AI after a memory_write so it can clean up overlapping memories.
@@ -112,7 +113,7 @@ export default class Store {
       dimensions: 2048,
       configuration: {
         // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        baseURL: MODELSTUDIO_BASE_URL
       }
     });
     return await embeddings.embedQuery(text);

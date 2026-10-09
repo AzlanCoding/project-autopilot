@@ -7,6 +7,7 @@ import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 import StoreHandle from "baileys-bottle-devstroupe/lib/bottle/StoreHandle";
 import { BufferSystem } from './bufferSystem';
+import { decideGroupReply, DecisionMsg, ReplyDecision } from './replyDecision';
 import type Store from "./store";
 import type AI from "./ai";
 import type { ChatAdapter } from "./ai";
@@ -58,7 +59,11 @@ export interface PreProccessChatMsg {
   user?: 'AI' | string | null,
   time: number,
   text: string,
-  quotedMessage?: string | null
+  quotedMessage?: string | null,
+  /** Sofia was @mentioned in this message. */
+  mentionsAI?: boolean,
+  /** This message replies to (quotes) one of Sofia's messages. */
+  quotesAI?: boolean,
 }
 
 
@@ -72,6 +77,8 @@ export class SofiaBot implements ChatAdapter {
   db: Store;
   store?: StoreHandle;
   bufferSystem: BufferSystem;
+  /** Group chat id -> timestamp of the newest message judged by `shouldReplyInGroup`. */
+  private lastJudgedAt: { [chatId: string]: number } = {};
   private saveAuthState?: () => Promise<any>;
   private bottleDataSource?: Awaited<ReturnType<Awaited<ReturnType<typeof BaileysBottle.init>>['createStore']>>['_ds'];
 
@@ -175,6 +182,12 @@ export class SofiaBot implements ChatAdapter {
             }
           }
 
+          if (connection === 'open') {
+            // The logger writes to log.log, so print to the console too to show up in `docker compose logs -f sofia`.
+            console.log(`[${new Date().toISOString()}] Sofia is connected to WhatsApp and ready (${this.sock?.user?.id}).`);
+            this.logger.info(`Connected to WhatsApp as ${this.sock?.user?.id}`);
+          }
+
           if (qr) {
             console.log("\n=================================");
             console.log("Scan to login to WhatsApp:");
@@ -228,34 +241,22 @@ export class SofiaBot implements ChatAdapter {
                       // The sender just sent a message so they are no longer typing.
                       this.bufferSystem.setTyping(msg.key.remoteJid, msg.key.participant || msg.key.remoteJid, false);
                       this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
+                        const isGroup = msg.key.remoteJid!.endsWith('@g.us');
+                        // In group chats, only show typing once Sofia has decided to reply.
+                        let stopTyping = isGroup ? undefined : this.keepTyping(msg.key.remoteJid!);
                         try {
-                          await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
                           const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
-                          if (chatHistory[chatHistory.length - 1].user != 'AI') {
-                            let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, 12)); // Limit to 12 messages.
-                            this.logger.trace(chatHistoryParsed);
-                            // if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us') && !(chatHistory.some(m => m.text.toLowerCase().includes('sofia')) && await this.ai.shouldRespond(chatHistoryParsed))) {
-                            if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
-
-                              let shouldReply = false;
-                              for (let i = 0; i < chatHistoryParsed.length; i++) {
-                                const msg = chatHistoryParsed[i];
-                                if (msg.type == 'message') {
-                                  if (msg.role == 'assistant') {
-                                    shouldReply = false;
-                                  }
-                                  else if (msg.role == 'user' && msg.content.toString().toLowerCase().includes('sofia')) {
-                                    shouldReply = true;
-                                  }
-                                }
-                              }
-
-                              if (!shouldReply) {
-                                await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
-                                this.logger.info(`Cancelling chat due to noreply logic ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
+                          if (chatHistory.length && chatHistory[chatHistory.length - 1].user != 'AI') {
+                            if (isGroup) {
+                              const decision = await this.shouldReplyInGroup(msg.key.remoteJid!, chatHistory);
+                              if (!decision.reply) {
+                                this.logger.info(`Not replying in ${msg.key.remoteJid}: ${decision.reason}`);
                                 return;
                               }
+                              stopTyping = this.keepTyping(msg.key.remoteJid!);
                             }
+                            let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, 12)); // Limit to 12 messages.
+                            this.logger.trace(chatHistoryParsed);
                             let systemPrompt;
                             if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
                               let grpName = (await this.store?.contacts.id(msg.key.remoteJid))?.name || "Unknown Group Chat";
@@ -265,14 +266,12 @@ export class SofiaBot implements ChatAdapter {
                               const current_user = await this.db.user.getUserByJid(msg.key.remoteJidAlt)
                               if (!current_user) {
                                 await this.sock!.sendMessage(msg.key.remoteJid!, { text: "Error: Unknown User. Please contact Azlan for access!" })
-                                await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
                                 this.logger.error(`Unknown user with jid ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
                                 return;
                               }
                               systemPrompt = await this.ai.generatePrompt('chat', current_user?.name, current_user?.id, current_user?.description)
                             }
                             else {
-                              await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
                               this.logger.error(`Unknown chat ${msg.key.remoteJid}  ${msg.key.remoteJidAlt}`);
                               return;
                             }
@@ -332,10 +331,12 @@ export class SofiaBot implements ChatAdapter {
                               }
                             }
                           }
-                          await this.sock!.sendPresenceUpdate('paused', msg.key.remoteJid!);
                         }
                         catch (e) {
                           this.logger.error(e);
+                        }
+                        finally {
+                          await stopTyping?.();
                         }
                       }).bind(this));
                     } else {
@@ -356,9 +357,8 @@ export class SofiaBot implements ChatAdapter {
           // console.dir(precense)
           this.logger.info(precense, "GOT PRESENCE")
           // Each update only contains the participants whose presence changed, so track them individually.
-          const ownJids = [this.sock?.user?.id, this.sock?.user?.lid].filter(j => j).map(j => jidNormalizedUser(j!));
           for (const [participant, p] of Object.entries(precense.presences)) {
-            if (ownJids.includes(jidNormalizedUser(participant))) {
+            if (this.isOwnJid(participant)) {
               continue;
             }
             this.bufferSystem.setTyping(precense.id, participant, p.lastKnownPresence == 'composing' || p.lastKnownPresence == 'recording');
@@ -372,6 +372,57 @@ export class SofiaBot implements ChatAdapter {
         // ... existing code ...
       }
     );
+  }
+
+  /**
+   * Shows Sofia as typing in a chat until the returned function is called. WhatsApp clears the typing status after
+   * a while even if `paused` is never sent, so it is re-sent every 7 seconds while Sofia is still working on a reply.
+   */
+  private keepTyping(jid: string): () => Promise<void> {
+    const send = (presence: 'composing' | 'paused') => this.sock?.sendPresenceUpdate(presence, jid)
+      .catch(e => this.logger.warn(e, `Failed to send ${presence} presence to ${jid}`));
+    send('composing');
+    const interval = setInterval(() => send('composing'), 7000);
+    return async () => {
+      clearInterval(interval);
+      await send('paused');
+    };
+  }
+
+  /**
+   * Decides whether Sofia should reply to the new messages in a group chat, see `decideGroupReply`.
+   * Remembers the newest judged message per chat so messages Sofia chose not to reply to are not judged again.
+   */
+  private async shouldReplyInGroup(chatId: string, chatHistory: PreProccessChatMsg[]): Promise<ReplyDecision> {
+    const recent = chatHistory.slice(-40);
+    const names = new Map<string, Promise<string>>();
+    const getName = (jid: string) => {
+      if (!names.has(jid)) {
+        names.set(jid, this.db.user.getUserByJid(jid).then(u => u?.name ?? `Unknown User (${jid.split('@')[0].slice(-4)})`));
+      }
+      return names.get(jid)!;
+    };
+    const messages: DecisionMsg[] = await Promise.all(recent.map(async m => ({
+      speaker: m.user == 'AI' ? null : m.user ? await getName(m.user) : 'Unknown User',
+      time: m.time,
+      text: m.text,
+      quotedMessage: m.quotedMessage,
+      mentionsAI: m.mentionsAI,
+      quotesAI: m.quotesAI,
+    })));
+    const decision = await decideGroupReply(messages, this.lastJudgedAt[chatId]);
+    this.lastJudgedAt[chatId] = recent[recent.length - 1].time;
+    this.logger.info({ chatId, reply: decision.reply, reason: decision.reason, answers: decision.answers }, 'Group reply decision');
+    return decision;
+  }
+
+  /** Whether a jid (phone number or lid, any device) belongs to Sofia's own account. */
+  private isOwnJid(jid?: string | null) {
+    if (!jid) {
+      return false;
+    }
+    const ownJids = [this.sock?.user?.id, this.sock?.user?.lid].filter(j => j).map(j => jidNormalizedUser(j!));
+    return ownJids.includes(jidNormalizedUser(jid));
   }
 
   public parseJid(jid?: string | null) {
@@ -436,6 +487,10 @@ export class SofiaBot implements ChatAdapter {
       }
       if (mentionedJids) {
         for (let i = 0; i < mentionedJids.length; i++) {
+          if (this.isOwnJid(mentionedJids[i])) {
+            text = text.replaceAll(`@${mentionedJids[i].replace(/@.*$/, '')}`, '@Sofia');
+            continue;
+          }
           let user;
           const jid_parsed = this.parseJid(await this.sock!.signalRepository.lidMapping.getPNForLID(mentionedJids[i]));
           if (jid_parsed) {
@@ -448,12 +503,22 @@ export class SofiaBot implements ChatAdapter {
     };
     const getText = (m: WAMessage) => m.message?.stickerMessage ? `<WhatsApp Sticker Or GIF>` : m.message?.videoMessage ? `<WhatsApp Video> ${m.message.videoMessage.caption || ""}` : m.message?.imageMessage ? `<WhatsApp Image> ${m.message.imageMessage.caption || ""}` : m.message?.conversation || m.message?.extendedTextMessage?.text;
     const getQuotedText = (q: proto.IMessage) => this.shortenQuotedText(q.stickerMessage ? `<WhatsApp Sticker Or GIF>` : q?.videoMessage ? `<WhatsApp Video> ${q.videoMessage.caption || ""}` : q.imageMessage ? `<WhatsApp Image> ${q.imageMessage.caption || ""}` : q.conversation || q.extendedTextMessage?.text);
-    if (remoteJid.endsWith("@g.us")) {
-      return (await Promise.all(messages.map(async (m: WAMessage) => ({ id: m.key.id, user: m.key.fromMe ? "AI" : this.parseJid(remoteJidAlt || await this.sock!.signalRepository.lidMapping.getPNForLID(m.participant || m.key.participant || "")), time: (m.messageTimestamp as any).low || m.messageTimestamp, text: await parseMentions(m, getText(m)), quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null })))).filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time) as PreProccessChatMsg[]
-    }
-    else {
-      return (await Promise.all(messages.map(async (m: WAMessage) => ({ id: m.key.id, user: m.key.fromMe ? "AI" : this.parseJid(remoteJidAlt), time: (m.messageTimestamp as any).low || m.messageTimestamp, text: await parseMentions(m, getText(m)), quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null })))).filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time) as PreProccessChatMsg[]
-    }
+    const getContextInfo = (m: WAMessage) => m.message?.extendedTextMessage?.contextInfo || m.message?.imageMessage?.contextInfo || m.message?.videoMessage?.contextInfo || m.message?.stickerMessage?.contextInfo;
+    const toChatMsg = async (m: WAMessage, user: string | null): Promise<PreProccessChatMsg> => {
+      const contextInfo = getContextInfo(m);
+      return {
+        id: m.key.id || undefined,
+        user,
+        time: (m.messageTimestamp as any).low || m.messageTimestamp,
+        text: await parseMentions(m, getText(m)) as string,
+        quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null,
+        mentionsAI: !!contextInfo?.mentionedJid?.some(j => this.isOwnJid(j)),
+        quotesAI: !!contextInfo?.quotedMessage && this.isOwnJid(contextInfo.participant),
+      };
+    };
+    const isGroup = remoteJid.endsWith("@g.us");
+    return (await Promise.all(messages.map(async (m: WAMessage) => toChatMsg(m, m.key.fromMe ? "AI" : this.parseJid(isGroup ? (remoteJidAlt || await this.sock!.signalRepository.lidMapping.getPNForLID(m.participant || m.key.participant || "")) : remoteJidAlt)))))
+      .filter((c: any) => c.text != undefined).sort((a: any, b: any) => a.time - b.time);
   }
 
   // ------------------------------------------------------------------
