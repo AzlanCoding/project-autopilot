@@ -5,6 +5,7 @@ include:
 services:
   sofia:
     build: .
+    image: sofia:latest
     restart: unless-stopped
     depends_on:
       - standalone
