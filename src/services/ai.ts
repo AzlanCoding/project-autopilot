@@ -55,6 +55,8 @@ export interface ScheduledTaskRunOptions {
 export default class AI {
   ai_user_id: string = "ea502c0f-7fe6-4f7c-9d63-80dd7b0de90e";
   test_mode: boolean = (process.env.TESTING != undefined && process.env.TESTING.toLowerCase() == "true");
+  /** Set by the CLI test harness so the system prompt tells the model it is being tested. */
+  cli_mode: boolean = false;
   logger: Logger;
   db: Store;
   openai = new OpenAI(
@@ -668,7 +670,7 @@ export default class AI {
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavailable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
       Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-      GROUP CHATS: ${await this.listGroupsTool!.func({})}`;
+      GROUP CHATS: ${await this.listGroupsTool!.func({})}${this.testModePrompt()}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
       const chatHistory: ResponseInputItem[] = [{
         role: 'system',
@@ -1489,6 +1491,17 @@ ${await message()}`,
   }
 
 
+  /** Extra system prompt text explaining the test environment, empty outside the CLI. */
+  testModePrompt(): string {
+    if (!this.cli_mode) return '';
+    return `\nTEST MODE: You are running inside a CLI test harness used by developers to test you, not on WhatsApp. ` +
+      `Messages sent with \`send_message\` and chat history from \`read_chat_history\` are simulated and do not reach real people. ` +
+      (this.test_mode
+        ? `Writes are disabled: memory writes and scheduled task changes will fail with "Disabled due to test mode." If that happens, tell the tester what you would have done instead of retrying.`
+        : `Writes are enabled against a test database, so memory and scheduled task changes are saved.`) +
+      ` Otherwise, behave exactly as you would with real users.`;
+  }
+
   async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string): Promise<string> {
     // 1. Read the System Prompt from the file
     const systemPromptPath = path.resolve("src/static/prompts/system.md");
@@ -1503,7 +1516,7 @@ ${await message()}`,
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.
-    Additionally, before using the \`send_message\` tool call, make sure to show the user what message you're sending.`
+    Additionally, before using the \`send_message\` tool call, make sure to show the user what message you're sending.${this.testModePrompt()}`
     // Available Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }

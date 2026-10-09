@@ -7,3 +7,4 @@ assets/*
 config/*
 volumes/*
 *.log
+.claude

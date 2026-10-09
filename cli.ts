@@ -69,6 +69,7 @@ const main = async () => {
 
   const ai = new AI(db, logger);
   ai.test_mode = !process.argv.includes('--allow-writes');
+  ai.cli_mode = true;
   const adapter = new MockChatAdapter(db);
   ai.registerChatTools(adapter);
 
