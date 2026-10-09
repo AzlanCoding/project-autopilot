@@ -10,6 +10,7 @@ import { AssessmentService } from './assessmentService';
 import { User } from '../models/User';
 import { UserService } from './userService';
 import type AI from './ai';
+import type { ScheduledTaskRunOptions } from './ai';
 import { type Logger } from 'pino';
 import { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.js';
 import { ToolCallHistService } from './ToolCallHistService';
@@ -36,7 +37,7 @@ export default class Store {
   user: UserService;
   private logger: Logger;
 
-  ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>, requireMessage?: boolean) => Promise<void>
+  ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>, options?: ScheduledTaskRunOptions) => Promise<void>
 
   constructor(logger: Logger) {
     this.logger = logger;

@@ -6,7 +6,7 @@
  *   --allow-writes  Allow memory and scheduled task writes. Only use against a test database.
  *   --seed          JSON file: { users: [{name, description, whatsapp_jid}], groups: [{id, name}],
  *                   chats: { "<user name or group id>": [{ from: "<user name>" | "AI", text, minutesAgo }] } }
- * Commands: /tasks, /run-task <id>, /chat <user name>, /wait <seconds>, /exit
+ * Commands: /tasks, /run-task <id>, /chat <user name>, /as <user name> <text>, /wait <seconds>, /exit
  * Lines can also be piped in through stdin to script a conversation.
  */
 import 'dotenv/config';
@@ -103,7 +103,7 @@ const main = async () => {
   const startChat = async () => {
     chatHistory = [{ role: 'system', content: await ai.generatePrompt('testing', user.name, user.id, user.description), type: 'message' } as EasyInputMessage];
     console.log(`\n=== Chatting as ${user.name} (${user.id}) | writes ${ai.test_mode ? 'disabled' : 'enabled'} ===`);
-    console.log('Commands: /tasks, /run-task <id>, /chat <user name>, /wait <seconds>, /exit\n');
+    console.log('Commands: /tasks, /run-task <id>, /chat <user name>, /as <user name> <text>, /wait <seconds>, /exit\n');
   };
   await startChat();
 
@@ -118,6 +118,12 @@ const main = async () => {
     if (input == '/exit') break;
     if (input == '/tasks') {
       console.log(await ai.listScheduledTasksTool.func({}));
+    }
+    else if (input.startsWith('/as ')) {
+      // /as <user name> <text>: that user messages Sofia (recorded only, no reply is generated)
+      const [, name, ...words] = input.split(' ');
+      const other = await findUser(name);
+      if (other) await adapter.record(other.id, other.whatsapp_jid, words.join(' ')); else console.log('Unknown user');
     }
     else if (input.startsWith('/wait ')) {
       await new Promise(r => setTimeout(r, Number(input.slice('/wait '.length)) * 1000));

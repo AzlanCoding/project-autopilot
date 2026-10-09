@@ -1,3 +1,4 @@
+import 'dotenv/config'; // Load before CHAT_MODEL is read, main.ts imports this file before loading dotenv
 import * as readline from 'readline';
 import { ChatOpenAI } from "@langchain/openai";
 import * as fs from 'fs/promises';
@@ -22,6 +23,9 @@ import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
 
+// Alibaba Model Studio model used for chats and scheduled tasks
+export const CHAT_MODEL = process.env.CHAT_MODEL || 'qwen3.8-flash';
+
 export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
   usage_str: string
   constructor(fields: ConstructorParameters<typeof DynamicStructuredTool>[0], usage_str: string) {
@@ -39,6 +43,13 @@ export interface ChatAdapter {
   listGroups(): Promise<{ id: string, name: string }[]>;
   /** Load the chat history with a user id or group id, oldest first. */
   loadChatById(id: string): Promise<PreProccessChatMsg[]>;
+}
+
+export interface ScheduledTaskRunOptions {
+  /** Whether the model must send a message with send_message. Defaults to true. */
+  requireMessage?: boolean;
+  /** User id or group id whose chat history should be included in the context. */
+  contextChatId?: string | null;
 }
 
 export default class AI {
@@ -91,6 +102,7 @@ export default class AI {
   sendMessageTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
+  chatAdapter?: ChatAdapter;
 
   // Week Tools
   weekNumToDateTool: ExtendedDynamicStructuredTool;
@@ -501,6 +513,15 @@ export default class AI {
       lastRunAt: t.lastRunAt ? formatDateTime(Number(t.lastRunAt)) : null,
       nextRun: (() => { const n = this.db.scheduledTask.nextRun(t.id); return n ? formatDateTime(n) : null; })(),
     });
+    const validateChatId = async (id?: string) => {
+      if (!id) return;
+      const exists = id.endsWith('@g.us')
+        ? !this.chatAdapter || (await this.chatAdapter.listGroups()).some(g => g.id == id)
+        : !!(await this.db.user.findById(id).catch(() => null));
+      if (!exists) {
+        throw Error(`Unknown user or group id "${id}". Get the correct id from \`user_list\` or \`list_groups\`.`);
+      }
+    };
     const parseRunAt = (runAt?: string) => {
       if (runAt === undefined) return undefined;
       const time = new Date(runAt).getTime();
@@ -526,6 +547,7 @@ export default class AI {
           throw Error("Disabled due to test mode.");
         }
         const { task, recurring, runAt, cronPattern, contextChatId } = args as any;
+        await validateChatId(contextChatId);
         const created = await this.db.scheduledTask.create({
           task,
           recurring,
@@ -623,7 +645,7 @@ export default class AI {
       this.model = new ChatOpenAI({
         apiKey: process.env.ALIBABA_API_KEY,
         // model: 'gpt-4o-mini',
-        model: 'qwen3.5-plus',
+        model: CHAT_MODEL,
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
           baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -640,24 +662,59 @@ export default class AI {
     }
     this.bindModel();
 
-    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.5-plus" }, requireMessage: boolean = true) => {
+    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: CHAT_MODEL }, { requireMessage = true, contextChatId }: ScheduledTaskRunOptions = {}) => {
       // 1. Read the System Prompt from the file
       const systemPromptPath = path.resolve("src/static/prompts/system.md");
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavailable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
       Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-      IMPORTANT: This chat is triggered automatically by the system due to a scheduled task. ${requireMessage ? 'MAKE SURE YOU SEND A REPLY USING THE send_message TOOL CALL!' : 'Nobody will see your text reply, use the send_message TOOL CALL if you need to message anyone.'} ONLY 1 USER MESSAGE WILL BE SENT! FOLLOW THE USER INSTRUCTIONS IMMEDIATELY! DO NOT ASK FOR CONFIRMATION!
       GROUP CHATS: ${await this.listGroupsTool!.func({})}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
-      const chatHistory: EasyInputMessage[] = [{
+      const chatHistory: ResponseInputItem[] = [{
         role: 'system',
         content: systemPrompt,
         type: 'message'
-      }, {
-        role: 'user',
-        content: (await message()),
+      } as EasyInputMessage];
+
+      // 2. Include the history of the chat the task relates to, formatted the same way as a live chat
+      let contextDescription = '';
+      if (contextChatId) {
+        try {
+          if (contextChatId.endsWith('@g.us')) {
+            const group = (await this.chatAdapter!.listGroups()).find(g => g.id == contextChatId);
+            contextDescription = `the group chat "${group?.name ?? 'Unknown Group Chat'}" (${contextChatId})`;
+          }
+          else {
+            const user = await this.db.user.findById(contextChatId);
+            contextDescription = `your chat with ${user?.name ?? 'Unknown User'} (${contextChatId})${user?.description ? `. User Description: ${user.description}` : ''}`;
+          }
+          const [history] = await this.db.user.formatAndMergeMessages(await this.chatAdapter!.loadChatById(contextChatId), 12);
+          if (history.length > 0) {
+            chatHistory.push({ role: 'system', content: `Below is the recent message history of ${contextDescription}.`, type: 'message' } as EasyInputMessage);
+            chatHistory.push(...history);
+          }
+          else {
+            contextDescription += ' (no messages yet)';
+          }
+        }
+        catch (e) {
+          this.logger.error(e, `Failed to load chat history of ${contextChatId} for scheduled task`);
+        }
+      }
+
+      // 3. Tell the model why it is running and what to do
+      chatHistory.push({
+        role: 'system',
+        content: `SCHEDULED TASK TRIGGER: You are being triggered automatically by a scheduled task, not by a new message${contextDescription ? `. The task relates to ${contextDescription}` : ''}.
+Current Time: ${formatDateTime(new Date())}
+Nobody will see your text reply. ${requireMessage ? 'MAKE SURE YOU SEND A MESSAGE USING THE send_message TOOL CALL!' : 'Use the send_message TOOL CALL if you need to message anyone.'} Do the task immediately, DO NOT ASK FOR CONFIRMATION!
+ONLY do the task below. Any other tasks or promises in the chat history are handled separately (by their own scheduled tasks or chats), do not do them here.
+
+Task:
+${await message()}`,
         type: 'message'
-      }]
+      } as EasyInputMessage);
+
       const streamGenerator = this.processChatv3(chatHistory, undefined, modelOptions);
       for await (const yieldState of streamGenerator) {
         if (yieldState.type === 'chunk_display') {
@@ -676,6 +733,7 @@ export default class AI {
    * Adds the tools that need a chat platform (send_message, list_groups, read_chat_history) and rebinds the model.
    */
   registerChatTools(adapter: ChatAdapter) {
+    this.chatAdapter = adapter;
     this.sendMessageTool = new ExtendedDynamicStructuredTool({
       name: "send_message",
       description: "Send a message to a chat or a group chat based on a user id or group id (ending with `@g.us`).",
@@ -1159,7 +1217,10 @@ export default class AI {
       console.log("\n🤖 Thinking (v3 with official OpenAI client)...");
 
       // Query memory and add a system hint if relevant
-      const memory = JSON.parse(await this.memoryQueryTool.func({ queryText: userInput || (chatHistory.filter(m => m.type == 'message' && m.role == 'user').slice(-1)[0] as EasyInputMessage).content }));
+      // Scheduled tasks may have no user message, so fall back to the latest message (the task instructions)
+      const messages = chatHistory.filter(m => m.type == 'message') as EasyInputMessage[];
+      const lastMessage = messages.filter(m => m.role == 'user').slice(-1)[0] ?? messages.slice(-1)[0];
+      const memory = JSON.parse(await this.memoryQueryTool.func({ queryText: userInput || lastMessage?.content }));
       this.logger.trace(memory, "Memory data retrieve")
       if (Array.isArray(memory) && memory.length > 0) {
         chatHistory.push({
@@ -1238,7 +1299,7 @@ export default class AI {
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
         const stream = await instance.openai.responses.create({
-          model: "qwen3.5-plus",
+          model: CHAT_MODEL,
           input: chatHistory,
           stream: true,
           tools: instance.tools.map((t) => ({

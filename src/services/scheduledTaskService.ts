@@ -71,13 +71,9 @@ export class ScheduledTaskService {
   /**
    * Builds the instruction sent to the AI when a task fires.
    */
-  async buildTaskPrompt(task: ScheduledTask): Promise<string> {
-    let context = '';
-    if (task.contextChatId) {
-      const user = task.contextChatId.endsWith('@g.us') ? null : await this.store.user.findById(task.contextChatId).catch(() => null);
-      context = ` while chatting in ${user ? `your chat with ${user.name} (${user.id})` : `chat ${task.contextChatId}`}`;
-    }
-    return `This is a task you scheduled for yourself on ${formatDateTime(Number(task.createdAt))}${context}.\n` +
+  buildTaskPrompt(task: ScheduledTask): string {
+    // The chat the task relates to and its history are added by ai_scheduled_task_runner
+    return `This is a task you scheduled for yourself on ${formatDateTime(Number(task.createdAt))}.\n` +
       `Task ID: ${task.id} (${task.recurring ? `recurring, cron "${task.cronPattern}"` : 'one-time'})\n` +
       (task.lastRunAt ? `Last ran: ${formatDateTime(Number(task.lastRunAt))}\n` : '') +
       `Task: ${task.task}\n\n` +
@@ -92,7 +88,7 @@ export class ScheduledTaskService {
       return;
     }
     this.logger.info(`Scheduled task ${id} executing`);
-    const prompt = await this.buildTaskPrompt(task);
+    const prompt = this.buildTaskPrompt(task);
     if (task.recurring) {
       await task.update({ lastRunAt: getTime() });
     }
@@ -100,7 +96,7 @@ export class ScheduledTaskService {
       // One-time tasks are removed before running so a crash mid-run doesn't make them repeat forever.
       await this.destroy(id);
     }
-    await this.store.ai_scheduled_task_runner!(async () => prompt, undefined, false);
+    await this.store.ai_scheduled_task_runner!(async () => prompt, undefined, { requireMessage: false, contextChatId: task.contextChatId });
     this.logger.info(`Scheduled task ${id} finished executing`);
   }
 
