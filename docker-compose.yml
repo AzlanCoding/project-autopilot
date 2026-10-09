@@ -1,3 +1,19 @@
 version: '3.8'
 include:
   - milvus-standalone-docker-compose.yml
+
+services:
+  sofia:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - standalone
+    # Milvus can take a while to be ready after its container starts, so give it a head start
+    command: ["sh", "-c", "sleep 45 && exec node dist/main.js"]
+    # Postgres and Milvus are reached through localhost (published ports / SSH tunnel)
+    network_mode: host
+    tty: true
+    volumes:
+      # Mounted instead of env_file so dotenv parses the quoted values
+      - ./.env:/app/.env:ro
+      - ./assets:/app/assets

@@ -1,0 +1,13 @@
+node_modules
+dist
+.env
+assets
+volumes
+config
+tests
+.git
+.claude
+.continue
+.vscode
+*.log
+wa-logs.txt

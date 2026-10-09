@@ -4,7 +4,9 @@
   "description": "",
   "main": "main.ts",
   "scripts": {
-    "run": "pnpm tsc && node ./dist/main.js"
+    "run": "pnpm tsc && node ./dist/main.js",
+    "cli": "pnpm tsc && node ./dist/cli.js",
+    "test": "pnpm tsc && node --test dist/tests/"
   },
   "keywords": [],
   "author": "AzlanCoding",

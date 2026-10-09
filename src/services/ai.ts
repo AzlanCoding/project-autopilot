@@ -1,3 +1,4 @@
+import 'dotenv/config'; // Load before CHAT_MODEL is read, main.ts imports this file before loading dotenv
 import * as readline from 'readline';
 import { ChatOpenAI } from "@langchain/openai";
 import * as fs from 'fs/promises';
@@ -16,9 +17,14 @@ import { OpenAI } from "openai";
 import Store from './store';
 import { formatDateTime, getTime, getWeekNumberFromDate, parseTimestamp, WK_Number_to_timeframe } from '../utils/common';
 import { User } from '../models/User';
+import { ScheduledTask } from '../models/ScheduledTask';
+import type { PreProccessChatMsg } from './botService';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
+
+// Alibaba Model Studio model used for chats and scheduled tasks
+export const CHAT_MODEL = process.env.CHAT_MODEL || 'qwen3.8-flash';
 
 export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
   usage_str: string
@@ -26,6 +32,24 @@ export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
     super(fields as any);
     this.usage_str = usage_str;
   }
+}
+
+/**
+ * Chat platform operations needed by the chat tools. Implemented by SofiaBot (WhatsApp) and by the CLI test harness.
+ */
+export interface ChatAdapter {
+  /** Send a message to a user id or group id (ending with `@g.us`). */
+  sendMessage(id: string, text: string): Promise<void>;
+  listGroups(): Promise<{ id: string, name: string }[]>;
+  /** Load the chat history with a user id or group id, oldest first. */
+  loadChatById(id: string): Promise<PreProccessChatMsg[]>;
+}
+
+export interface ScheduledTaskRunOptions {
+  /** Whether the model must send a message with send_message. Defaults to true. */
+  requireMessage?: boolean;
+  /** User id or group id whose chat history should be included in the context. */
+  contextChatId?: string | null;
 }
 
 export default class AI {
@@ -45,6 +69,7 @@ export default class AI {
   // Tools will be initialized in constructor so they can reference this.db
   getCurrentTimeTool: ExtendedDynamicStructuredTool;
   memoryWriteTool: ExtendedDynamicStructuredTool;
+  memoryUpdateTool: ExtendedDynamicStructuredTool;
   memoryQueryTool: ExtendedDynamicStructuredTool;
   memoryQueryByUserTool: ExtendedDynamicStructuredTool;
   memoryDeleteTool: ExtendedDynamicStructuredTool;
@@ -73,13 +98,21 @@ export default class AI {
   stickerGifTool: ExtendedDynamicStructuredTool;
   sendStickerGifTool: ExtendedDynamicStructuredTool;
 
-  // WhatsApp Specific Tools will be added later on runtime
+  // Chat platform specific tools will be added later on runtime by registerChatTools()
   sendMessageTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
+  readChatHistoryTool?: ExtendedDynamicStructuredTool;
+  chatAdapter?: ChatAdapter;
 
   // Week Tools
   weekNumToDateTool: ExtendedDynamicStructuredTool;
   dateToWeekNumTool: ExtendedDynamicStructuredTool;
+
+  // Scheduled Task Tools
+  scheduleTaskTool: ExtendedDynamicStructuredTool;
+  listScheduledTasksTool: ExtendedDynamicStructuredTool;
+  editScheduledTaskTool: ExtendedDynamicStructuredTool;
+  cancelScheduledTaskTool: ExtendedDynamicStructuredTool;
 
   tools: ExtendedDynamicStructuredTool[];
 
@@ -103,7 +136,7 @@ export default class AI {
     // memory_write tool: calls store.memoryWrite
     this.memoryWriteTool = new ExtendedDynamicStructuredTool({
       name: "memory_write",
-      description: "Store a durable memory in the database with optional dedupe strategy",
+      description: "Store a durable memory in the database. The result lists other similar memories, update or delete any that are now outdated or duplicated.",
       schema: z.object({
         text: z.string().describe("[Required] The core text content of the memory to be stored. Do not put any user ID inside this field. Make sure the content is not time relative. (e.g., instead of 10 mins ago, state the actual date time.)"),
         authorUserId: z.string().optional().describe(`The ID of the user who told you about this memory. Put ${this.ai_user_id} if you are writing it on your own.`),
@@ -112,17 +145,31 @@ export default class AI {
         isGlobal: z.boolean().optional().describe("A flag indicating if this memory should be considered global."),
         category: z.string().optional().describe("A categorization tag for the memory. If it is an event, put 'event'. If its a memory related to yourself, put 'core'. Put 'important' if its extremly important that you remember this fact, leave empty if none of these apply."),
         // sourceMessageId: z.string().optional().describe("The ID of the original message where this memory originated."),
-        dedupeStrategy: z.enum(['supersede', 'overwrite', 'merge', 'keep_both']).optional().describe("The strategy to use if a similar memory already exists.")
       }),
       func: async (args) => {
         if (this.test_mode) {
           throw Error("Disabled due to test mode.");
         }
-        const res = await this.db.memoryWrite(args as any);
         // memoryWrite returns a human-friendly string already
-        return String(res);
+        return await this.db.memoryWrite(args as any);
       }
-    }, "{text: string, authorUserId?: string, subjectUserId?: string, groupId?: string, isGlobal?: boolean, category?: string, dedupeStrategy?: 'supersede'|'overwrite'|'merge'|'keep_both'}");
+    }, "{text: string, authorUserId?: string, subjectUserId?: string, groupId?: string, isGlobal?: boolean, category?: string}");
+
+    this.memoryUpdateTool = new ExtendedDynamicStructuredTool({
+      name: "memory_update",
+      description: "Replace the text of an existing memory by ID. Use this to correct or merge outdated memories.",
+      schema: z.object({
+        memoryId: z.string().describe("[Required] The ID of the memory to update."),
+        text: z.string().min(1).describe("[Required] The new full text of the memory. Same rules as memory_write: no user IDs, no time relative wording."),
+      }),
+      func: async (args) => {
+        if (this.test_mode) {
+          throw Error("Disabled due to test mode.");
+        }
+        const { memoryId, text } = args as any;
+        return await this.db.memoryUpdate(memoryId, text);
+      }
+    }, "{memoryId: string, text: string}");
 
     // memory_query tool: calls store.memoryQuery
     this.memoryQueryTool = new ExtendedDynamicStructuredTool({
@@ -455,16 +502,131 @@ export default class AI {
     }, "{date: string}")
 
 
+    // Scheduled Task Tools
+    const formatTask = (t: ScheduledTask) => ({
+      id: t.id,
+      task: t.task,
+      recurring: t.recurring,
+      ...(t.recurring ? { cronPattern: t.cronPattern } : { runAt: formatDateTime(Number(t.runAt)) }),
+      contextChatId: t.contextChatId,
+      createdAt: formatDateTime(Number(t.createdAt)),
+      lastRunAt: t.lastRunAt ? formatDateTime(Number(t.lastRunAt)) : null,
+      nextRun: (() => { const n = this.db.scheduledTask.nextRun(t.id); return n ? formatDateTime(n) : null; })(),
+    });
+    const validateChatId = async (id?: string) => {
+      if (!id) return;
+      const exists = id.endsWith('@g.us')
+        ? !this.chatAdapter || (await this.chatAdapter.listGroups()).some(g => g.id == id)
+        : !!(await this.db.user.findById(id).catch(() => null));
+      if (!exists) {
+        throw Error(`Unknown user or group id "${id}". Get the correct id from \`user_list\` or \`list_groups\`.`);
+      }
+    };
+    const parseRunAt = (runAt?: string) => {
+      if (runAt === undefined) return undefined;
+      const time = new Date(runAt).getTime();
+      if (isNaN(time)) {
+        throw Error(`Invalid runAt "${runAt}". Use ISO 8601 in Singapore Timezone, e.g, 2026-04-16T11:47:12+08:00`);
+      }
+      return time;
+    };
+    const cronDescription = `Cron pattern in Singapore Timezone, either "minute hour day-of-month month day-of-week" or with seconds in front. E.g, "0 9 * * 1-5" is 9am every weekday, "*/30 * * * *" is every 30 minutes.`;
+
+    this.scheduleTaskTool = new ExtendedDynamicStructuredTool({
+      name: "schedule_task",
+      description: "Schedule yourself to do a task later, once or on a recurring schedule. E.g, check if someone has replied, remind someone about something, follow up on a conversation. When it runs you will be given the task text, so write it with all the context you will need (who, which chat, what to check or say).",
+      schema: z.object({
+        task: z.string().min(1).describe("[Required] Detailed instructions for your future self, including names and user/group IDs involved."),
+        recurring: z.boolean().describe("[Required] true to repeat on cronPattern, false to run once at runAt."),
+        runAt: z.string().optional().describe("Required if recurring is false. When to run, as ISO 8601 in Sigapore Timezone. E.g, 2026-04-16T11:47:12+08:00"),
+        cronPattern: z.string().optional().describe(`Required if recurring is true. ${cronDescription}`),
+        contextChatId: z.string().optional().describe("The user ID or group ID of the chat this task relates to (usually the current chat)."),
+      }),
+      func: async (args) => {
+        if (this.test_mode) {
+          throw Error("Disabled due to test mode.");
+        }
+        const { task, recurring, runAt, cronPattern, contextChatId } = args as any;
+        await validateChatId(contextChatId);
+        const created = await this.db.scheduledTask.create({
+          task,
+          recurring,
+          runAt: recurring ? null : (parseRunAt(runAt) ?? null),
+          cronPattern: recurring ? cronPattern : null,
+          contextChatId: contextChatId ?? null,
+        });
+        return JSON.stringify(formatTask(created));
+      }
+    }, "{task: string, recurring: boolean, runAt?: string, cronPattern?: string, contextChatId?: string}");
+
+    this.listScheduledTasksTool = new ExtendedDynamicStructuredTool({
+      name: "list_scheduled_tasks",
+      description: "List all tasks you have scheduled for yourself.",
+      schema: z.object({}),
+      func: async () => {
+        return JSON.stringify((await this.db.scheduledTask.findAll()).map(formatTask));
+      }
+    }, "{}");
+
+    this.editScheduledTaskTool = new ExtendedDynamicStructuredTool({
+      name: "edit_scheduled_task",
+      description: "Edit a scheduled task by id. Only provide the fields you want to change.",
+      schema: z.object({
+        id: z.string().describe("[Required] The ID of the scheduled task."),
+        task: z.string().min(1).optional().describe("New instructions."),
+        recurring: z.boolean().optional().describe("Change between one-time (false) and recurring (true). Provide runAt or cronPattern to match."),
+        runAt: z.string().optional().describe("New run time for one-time tasks, as ISO 8601 in Sigapore Timezone. E.g, 2026-04-16T11:47:12+08:00"),
+        cronPattern: z.string().optional().describe(`New schedule for recurring tasks. ${cronDescription}`),
+      }),
+      func: async (args) => {
+        if (this.test_mode) {
+          throw Error("Disabled due to test mode.");
+        }
+        const { id, task, recurring, runAt, cronPattern } = args as any;
+        const updated = await this.db.scheduledTask.update(id, {
+          ...(task !== undefined ? { task } : {}),
+          ...(recurring !== undefined ? { recurring } : {}),
+          ...(runAt !== undefined ? { runAt: parseRunAt(runAt) } : {}),
+          ...(cronPattern !== undefined ? { cronPattern } : {}),
+        });
+        if (!updated) {
+          throw Error("Scheduled task not found.");
+        }
+        return JSON.stringify(formatTask(updated));
+      }
+    }, "{id: string, task?: string, recurring?: boolean, runAt?: string, cronPattern?: string}");
+
+    this.cancelScheduledTaskTool = new ExtendedDynamicStructuredTool({
+      name: "cancel_scheduled_task",
+      description: "Cancel (delete) a scheduled task by id.",
+      schema: z.object({
+        id: z.string().describe("[Required] The ID of the scheduled task to cancel."),
+      }),
+      func: async (args) => {
+        if (this.test_mode) {
+          throw Error("Disabled due to test mode.");
+        }
+        const { id } = args as any;
+        if (!(await this.db.scheduledTask.findById(id))) {
+          throw Error("Scheduled task not found.");
+        }
+        await this.db.scheduledTask.destroy(id);
+        return JSON.stringify({ success: true, id });
+      }
+    }, "{id: string}");
+
+
     // Register tools (order doesn't matter)
     this.tools = [
       this.getCurrentTimeTool,
-      this.memoryWriteTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
+      this.memoryWriteTool, this.memoryUpdateTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
       this.assignmentCreateTool/*, this.assignmentGetTool*/, this.assignmentListTool, this.assignmentUpdateTool, this.assignmentDeleteTool,
       this.assessmentCreateTool/*, this.assessmentGetTool*/, this.assessmentListTool, this.assessmentUpdateTool, this.assessmentDeleteTool,
       this.userListTool,
       this.stickerGifTool, this.sendStickerGifTool,
       this.timetableTool,
-      this.weekNumToDateTool, this.dateToWeekNumTool
+      this.weekNumToDateTool, this.dateToWeekNumTool,
+      this.scheduleTaskTool, this.listScheduledTasksTool, this.editScheduledTaskTool, this.cancelScheduledTaskTool
     ];
 
     // Model Setup (Keep Ollama/OpenAI context)
@@ -483,7 +645,7 @@ export default class AI {
       this.model = new ChatOpenAI({
         apiKey: process.env.ALIBABA_API_KEY,
         // model: 'gpt-4o-mini',
-        model: 'qwen3.5-plus',
+        model: CHAT_MODEL,
         configuration: {
           // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
           baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -500,24 +662,59 @@ export default class AI {
     }
     this.bindModel();
 
-    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: "qwen3.5-plus" }) => {
+    this.db.ai_scheduled_task_runner = async (message: () => Promise<string>, modelOptions: Partial<ResponseCreateParamsStreaming> = { model: CHAT_MODEL }, { requireMessage = true, contextChatId }: ScheduledTaskRunOptions = {}) => {
       // 1. Read the System Prompt from the file
       const systemPromptPath = path.resolve("src/static/prompts/system.md");
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavailable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
       Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-      IMPORTANT: This chat is triggered automatically by the system due to a scheduled task. MAKE SURE YOU SEND A REPLY USING THE send_message TOOL CALL! ONLY 1 USER MESSAGE WILL BE SENT! FOLLOW THE USER INSTRUCTIONS IMMEDIATELY! DO NOT ASK FOR CONFIRMATION!
       GROUP CHATS: ${await this.listGroupsTool!.func({})}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
-      const chatHistory: EasyInputMessage[] = [{
+      const chatHistory: ResponseInputItem[] = [{
         role: 'system',
         content: systemPrompt,
         type: 'message'
-      }, {
-        role: 'user',
-        content: (await message()),
+      } as EasyInputMessage];
+
+      // 2. Include the history of the chat the task relates to, formatted the same way as a live chat
+      let contextDescription = '';
+      if (contextChatId) {
+        try {
+          if (contextChatId.endsWith('@g.us')) {
+            const group = (await this.chatAdapter!.listGroups()).find(g => g.id == contextChatId);
+            contextDescription = `the group chat "${group?.name ?? 'Unknown Group Chat'}" (${contextChatId})`;
+          }
+          else {
+            const user = await this.db.user.findById(contextChatId);
+            contextDescription = `your chat with ${user?.name ?? 'Unknown User'} (${contextChatId})${user?.description ? `. User Description: ${user.description}` : ''}`;
+          }
+          const [history] = await this.db.user.formatAndMergeMessages(await this.chatAdapter!.loadChatById(contextChatId), 12);
+          if (history.length > 0) {
+            chatHistory.push({ role: 'system', content: `Below is the recent message history of ${contextDescription}.`, type: 'message' } as EasyInputMessage);
+            chatHistory.push(...history);
+          }
+          else {
+            contextDescription += ' (no messages yet)';
+          }
+        }
+        catch (e) {
+          this.logger.error(e, `Failed to load chat history of ${contextChatId} for scheduled task`);
+        }
+      }
+
+      // 3. Tell the model why it is running and what to do
+      chatHistory.push({
+        role: 'system',
+        content: `SCHEDULED TASK TRIGGER: You are being triggered automatically by a scheduled task, not by a new message${contextDescription ? `. The task relates to ${contextDescription}` : ''}.
+Current Time: ${formatDateTime(new Date())}
+Nobody will see your text reply. ${requireMessage ? 'MAKE SURE YOU SEND A MESSAGE USING THE send_message TOOL CALL!' : 'Use the send_message TOOL CALL if you need to message anyone.'} Do the task immediately, DO NOT ASK FOR CONFIRMATION!
+ONLY do the task below. Any other tasks or promises in the chat history are handled separately (by their own scheduled tasks or chats), do not do them here.
+
+Task:
+${await message()}`,
         type: 'message'
-      }]
+      } as EasyInputMessage);
+
       const streamGenerator = this.processChatv3(chatHistory, undefined, modelOptions);
       for await (const yieldState of streamGenerator) {
         if (yieldState.type === 'chunk_display') {
@@ -530,6 +727,70 @@ export default class AI {
         }
       }
     }
+  }
+
+  /**
+   * Adds the tools that need a chat platform (send_message, list_groups, read_chat_history) and rebinds the model.
+   */
+  registerChatTools(adapter: ChatAdapter) {
+    this.chatAdapter = adapter;
+    this.sendMessageTool = new ExtendedDynamicStructuredTool({
+      name: "send_message",
+      description: "Send a message to a chat or a group chat based on a user id or group id (ending with `@g.us`).",
+      schema: z.object({
+        id: z.string().describe("[Required] The user id or group id to send the chat to. E.g,`467793d9-6b60-45e7-9fbc-a202ef40837f` or `12345678@g.us`"),
+        text: z.string().min(1).describe("The message to send."),
+      }),
+      func: async (args) => {
+        const { id, text } = args as any;
+        await adapter.sendMessage(id, text);
+        return "Message Sent";
+      }
+    }, "{id: string, text: string}");
+
+    this.listGroupsTool = new ExtendedDynamicStructuredTool({
+      name: 'list_groups',
+      description: 'List all of the group chats that you have access to.',
+      schema: z.object({}),
+      func: async () => {
+        return JSON.stringify(await adapter.listGroups());
+      }
+    }, "{}");
+
+    this.readChatHistoryTool = new ExtendedDynamicStructuredTool({
+      name: "read_chat_history",
+      description: "Read the recent chat history you had with a user (by user id) or in a group chat (by group id ending with `@g.us`). Useful to check if someone replied, or to recall what was said in another chat. Be discreet about sharing private chats with other people.",
+      schema: z.object({
+        id: z.string().describe("[Required] The user id or group id. Get them from `user_list` or `list_groups`."),
+        limit: z.number().int().min(1).max(100).optional().describe("Maximum number of most recent messages to return. Defaults to 30."),
+      }),
+      func: async (args) => {
+        const { id, limit = 30 } = args as any;
+        const messages = (await adapter.loadChatById(id)).slice(-limit);
+        if (messages.length === 0) {
+          return "No messages found in this chat.";
+        }
+        const names: { [jid: string]: string } = {};
+        const lines = [];
+        for (const m of messages) {
+          let name;
+          if (m.user === 'AI') {
+            name = 'You (Sofia)';
+          }
+          else if (m.user) {
+            name = names[m.user] ??= await this.db.user.generateUserStringFromJid(m.user);
+          }
+          else {
+            name = 'Unknown User';
+          }
+          lines.push(`[${formatDateTime(m.time * 1000)}] ${name}: ${m.quotedMessage ? `(Quoting: ${m.quotedMessage}) ` : ''}${m.text}`);
+        }
+        return lines.join('\n');
+      }
+    }, "{id: string, limit?: number}");
+
+    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool);
+    this.bindModel();
   }
 
   // /**
@@ -956,7 +1217,10 @@ export default class AI {
       console.log("\n🤖 Thinking (v3 with official OpenAI client)...");
 
       // Query memory and add a system hint if relevant
-      const memory = JSON.parse(await this.memoryQueryTool.func({ queryText: userInput || (chatHistory.filter(m => m.type == 'message' && m.role == 'user').slice(-1)[0] as EasyInputMessage).content }));
+      // Scheduled tasks may have no user message, so fall back to the latest message (the task instructions)
+      const messages = chatHistory.filter(m => m.type == 'message') as EasyInputMessage[];
+      const lastMessage = messages.filter(m => m.role == 'user').slice(-1)[0] ?? messages.slice(-1)[0];
+      const memory = JSON.parse(await this.memoryQueryTool.func({ queryText: userInput || lastMessage?.content }));
       this.logger.trace(memory, "Memory data retrieve")
       if (Array.isArray(memory) && memory.length > 0) {
         chatHistory.push({
@@ -1035,7 +1299,7 @@ export default class AI {
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
         const stream = await instance.openai.responses.create({
-          model: "qwen3.5-plus",
+          model: CHAT_MODEL,
           input: chatHistory,
           stream: true,
           tools: instance.tools.map((t) => ({

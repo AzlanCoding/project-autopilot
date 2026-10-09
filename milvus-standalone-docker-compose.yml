@@ -3,6 +3,7 @@ version: '3.5'
 services:
   etcd:
     container_name: milvus-etcd
+    restart: unless-stopped
     image: quay.io/coreos/etcd:v3.5.25
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
@@ -20,6 +21,7 @@ services:
 
   minio:
     container_name: milvus-minio
+    restart: unless-stopped
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     environment:
       MINIO_ACCESS_KEY: minioadmin
@@ -38,6 +40,7 @@ services:
 
   standalone:
     container_name: milvus-standalone
+    restart: unless-stopped
     image: milvusdb/milvus:v2.6.14
     command: [ "milvus", "run", "standalone" ]
     security_opt:

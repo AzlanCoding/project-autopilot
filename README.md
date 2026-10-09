@@ -43,14 +43,21 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   When messages are scheduled to be sent, the messages should only be written when they are scheduled so that any context of new memory can be used.    
     
   
+## Running
+*   `pnpm run run` builds and starts the bot. Set `CHAT_MODEL` in `.env` to change the Alibaba Model Studio model (defaults to `qwen3.8-flash`).
+*   `pnpm test` runs the unit tests.
+*   `pnpm cli --seed tests/seed.example.json --user Azlan --allow-writes` chats with Sofia in the terminal without WhatsApp. `send_message`, `list_groups` and `read_chat_history` use an in-memory mock, everything else is real, so point `SQL_DATABASE_URL` and `MILVUS_ADDRESS` at a test database when using `--allow-writes`. Lines can be piped in through stdin to script a conversation. See `cli.ts` for commands.
+*   Docker: `docker compose up -d --build` starts Milvus and the bot (the bot waits 45 seconds for Milvus first), then scan the QR code from `docker compose logs -f sofia`. Everything restarts unless stopped. `.env` and `assets/` are mounted into the container.
+
+
 ## TODO
 *   ~~Add Tool Calls to chat history~~
 *   ~~Change prompts to `AI Class Assistant` instead of class chairperson.~~
 *   ~~Verify that RAG works.~~
-*   Add tool for sofia to schedule herself to do certain tasks.
+*   ~~Add tool for sofia to schedule herself to do certain tasks.~~
 *   Add tool for sofia to get the timetable for the whole week given a week number (e.g. week 12). This will allow her to find out what is the date of the lesson in week n.
-*   Add tool for sofia to get a chat history.
-*   Change memory tool. Make it tell sofia related memory and suggest to delete when creating memory.
+*   ~~Add tool for sofia to get a chat history.~~
+*   ~~Change memory tool. Make it tell sofia related memory and suggest to delete when creating memory.~~
 *   PDF Document Support
 *   Web Console
 *   Sticker & GIF support.

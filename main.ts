@@ -49,6 +49,7 @@ const main = async () => {
 
   const bot = new SofiaBot(logger, ai, db);
   await bot.connect();
+  await db.scheduledTask.initService();
 
   // console.log("Starting...");
   // await ai.run();
