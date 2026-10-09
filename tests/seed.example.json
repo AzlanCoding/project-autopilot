@@ -1,0 +1,20 @@
+{
+  "users": [
+    { "name": "Azlan", "description": "Created Sofia. Former class chairperson of IT2504.", "whatsapp_jid": "6500000001@s.whatsapp.net" },
+    { "name": "Bryan", "description": "Classmate in IT2504.", "whatsapp_jid": "6500000002@s.whatsapp.net" }
+  ],
+  "groups": [
+    { "id": "120363000000000000@g.us", "name": "IT2504 PEM & PCS" }
+  ],
+  "chats": {
+    "Bryan": [
+      { "from": "AI", "text": "Hey Bryan! Azlan wanted to know if you're joining the project meeting on Friday?", "minutesAgo": 120 },
+      { "from": "Bryan", "text": "yea I'll be there, might be 10 mins late tho", "minutesAgo": 90 }
+    ],
+    "120363000000000000@g.us": [
+      { "from": "Bryan", "text": "anyone knows when the networking assignment is due?", "minutesAgo": 60 },
+      { "from": "Azlan", "text": "I think next friday 11:59pm", "minutesAgo": 55 },
+      { "from": "AI", "text": "Yup! It's due next Friday at 11:59pm, don't forget to submit it on Brightspace!", "minutesAgo": 54 }
+    ]
+  }
+}

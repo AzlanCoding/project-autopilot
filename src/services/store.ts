@@ -14,8 +14,13 @@ import { type Logger } from 'pino';
 import { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.js';
 import { ToolCallHistService } from './ToolCallHistService';
 import { ToolCallHist } from '../models/ToolCallHist';
+import { ScheduledTaskService } from './scheduledTaskService';
+import { ScheduledTask } from '../models/ScheduledTask';
 
 const SETTINGS_PATH = './assets/settings.json';
+// Shown to the AI after a memory_write so it can clean up overlapping memories.
+const SIMILAR_MEMORY_TOP_K = 5;
+const SIMILAR_MEMORY_MAX_DISTANCE = 0.8; // Squared L2 on unit vectors, roughly cosine similarity >= 0.6
 interface AppSettings { subjects: { [k: string]: string }; reminders: number[]; }
 
 
@@ -27,10 +32,11 @@ export default class Store {
   assignment: AssignmentService;
   assessment: AssessmentService;
   toolCallHist: ToolCallHistService;
+  scheduledTask: ScheduledTaskService;
   user: UserService;
   private logger: Logger;
 
-  ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>) => Promise<void>
+  ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>, requireMessage?: boolean) => Promise<void>
 
   constructor(logger: Logger) {
     this.logger = logger;
@@ -49,6 +55,7 @@ export default class Store {
     this.assignment = new AssignmentService(this, this.logger);
     this.assessment = new AssessmentService(this, this.logger);
     this.toolCallHist = new ToolCallHistService(this, this.logger);
+    this.scheduledTask = new ScheduledTaskService(this, this.logger);
     this.user = new UserService(this);
   }
 
@@ -60,12 +67,14 @@ export default class Store {
     const AssessmentModel = Assessment.register(this.db);
     const UserModel = User.register(this.db);
     const ToolCallHistModel = ToolCallHist.register(this.db);
+    const ScheduledTaskModel = ScheduledTask.register(this.db);
 
     // Optionally ensure they are available on sequelize.models with the same keys you expect
     this.db.models.AssignmentStore = AssignmentModel;
     this.db.models.AssessmentStore = AssessmentModel;
     this.db.models.UserStore = UserModel;
     this.db.models.ToolCallHistStore = ToolCallHistModel;
+    this.db.models.ScheduledTaskStore = ScheduledTaskModel;
 
     // this.assignment = AssignmentModel as any; // Quick Fix
     // this.assessment = AssessmentModel as any; // Quic Fix
@@ -76,6 +85,7 @@ export default class Store {
     await AssessmentModel.sync({ alter: true });
     await User.sync({ alter: true });
     await ToolCallHistModel.sync({ alter: true });
+    await ScheduledTaskModel.sync({ alter: true });
 
     this.assignment = new AssignmentService(this, this.logger);
     await this.assignment.initService();
@@ -83,6 +93,7 @@ export default class Store {
     await this.assessment.initService();
     this.user = new UserService(this);
     this.toolCallHist = new ToolCallHistService(this, this.logger);
+    this.scheduledTask = new ScheduledTaskService(this, this.logger);
 
     // for (let table in tables) {
     //   const tbl = this.db.define(table, tables[table]);
@@ -160,7 +171,8 @@ export default class Store {
     subjectUserId,
     groupId,
     isGlobal = false,
-    category
+    category,
+    embedding
   }: {
     text: string;
     authorUserId?: string;
@@ -168,8 +180,9 @@ export default class Store {
     groupId?: string;
     isGlobal?: boolean;
     category?: string;
+    embedding?: number[];
   }) {
-    const embedding = await this.getEmbedding(text);
+    embedding = embedding ?? await this.getEmbedding(text);
     const memoryId = uuidv4();
     const createdAt = new Date().toISOString();
 
@@ -252,13 +265,15 @@ export default class Store {
   async queryMemory({
     queryText,
     topK = 5,
-    expr
+    expr,
+    embedding
   }: {
     queryText: string;
     topK?: number;
     expr?: string;
+    embedding?: number[];
   }) {
-    const embedding = await this.getEmbedding(queryText);
+    embedding = embedding ?? await this.getEmbedding(queryText);
 
     const searchRes = await this.milvus.search({
       collection_name: this.milvusCollectionName,
@@ -300,68 +315,14 @@ export default class Store {
     return searchRes.results
   }
 
-  // Dedupe: find similar memories in same scope and apply strategy
-  async insertMemoryWithDedupe({
-    text,
-    authorUserId,
-    subjectUserId,
-    groupId,
-    isGlobal = false,
-    category,
-    dedupeStrategy = 'supersede',
-    topK = 5,
-    similarityThreshold = 0.85 // cosine-like similarity threshold; tune
-  }: {
-    text: string;
-    authorUserId?: string;
-    subjectUserId?: string;
-    groupId?: string;
-    isGlobal?: boolean;
-    category?: string;
-    dedupeStrategy?: 'supersede' | 'overwrite' | 'merge' | 'keep_both';
-    topK?: number;
-    similarityThreshold?: number;
-  }) {
-    // Build expr to scope search (allow global if isGlobal true)
-    const exprParts: string[] = [];
-    if (subjectUserId) exprParts.push(`subject_user_id == "${subjectUserId}"`);
-    if (groupId) exprParts.push(`group_id == "${groupId}"`);
-    if (category) exprParts.push(`category == "${category}"`);
-    // include global memories by default; if you want to exclude, add is_global == true/false
-    const expr = exprParts.length ? exprParts.join(' && ') : undefined;
-
-    // Search Milvus for candidates
-    const candidates = await this.queryMemory({ queryText: text, topK, expr });
-
-    // Decide best candidate by score (higher is better for IP/cosine)
-    const best = candidates && candidates.length > 0 ? candidates[0] : null;
-
-    if (best && best.score !== null && best.score >= similarityThreshold) {
-      const existingId = best.id;
-      if (dedupeStrategy === 'overwrite') {
-        await this.updateMemory({ memoryId: existingId, text, authorUserId, subjectUserId, groupId, isGlobal, category });
-        return { action: 'overwrite', id: existingId };
-      }
-      if (dedupeStrategy === 'supersede') {
-        const newRow = await this.writeMemory({ text, authorUserId, subjectUserId, groupId, isGlobal, category });
-        // mark old as superseded by inserting a small tombstone or deleting old entity
-        await this.deleteMemory(existingId);
-        return { action: 'supersede', newId: newRow.id, superseded: existingId };
-      }
-      if (dedupeStrategy === 'merge') {
-        const mergedText = `${best.text}\n\n[MERGED ${new Date().toISOString()}] ${text}`;
-        await this.updateMemory({ memoryId: existingId, text: mergedText, authorUserId, subjectUserId, groupId, isGlobal, category });
-        return { action: 'merge', id: existingId };
-      }
-      if (dedupeStrategy === 'keep_both') {
-        const newRow = await this.writeMemory({ text, authorUserId, subjectUserId, groupId, isGlobal, category });
-        return { action: 'inserted', id: newRow.id };
-      }
-      throw new Error(`Unknown dedupe strategy: ${dedupeStrategy}`);
-    } else {
-      const newRow = await this.writeMemory({ text, authorUserId, subjectUserId, groupId, isGlobal, category });
-      return { action: 'inserted', id: newRow.id };
-    }
+  // Fetch a single memory by id (null if it doesn't exist)
+  async getMemoryById(memoryId: string) {
+    const q = await this.milvus.query({
+      collection_name: this.milvusCollectionName,
+      expr: `memory_id == "${memoryId}"`,
+      output_fields: ['memory_id', 'text', 'author_user_id', 'subject_user_id', 'group_id', 'is_global', 'category', 'created_at']
+    });
+    return q.data.length > 0 ? q.data[0] : null;
   }
 
   // Optional: query by user id (subject or author)
@@ -390,9 +351,10 @@ export default class Store {
   }
 
   /**
- * Wrapper used by the ExtendedDynamicStructuredTool "memory_write".
- * Delegates to insertMemoryWithDedupe (Milvus-backed) and returns a human-friendly string.
- */
+   * Wrapper used by the ExtendedDynamicStructuredTool "memory_write".
+   * Always inserts the new memory, then lists the closest existing memories so the AI can decide
+   * whether any of them should be updated or deleted.
+   */
   async memoryWrite(args: {
     text: string;
     authorUserId?: string;
@@ -400,44 +362,45 @@ export default class Store {
     groupId?: string;
     isGlobal?: boolean;
     category?: string;
-    sourceMessageId?: string;
-    dedupeStrategy?: 'supersede' | 'overwrite' | 'merge' | 'keep_both';
   }) {
-    const {
-      text,
-      authorUserId,
-      subjectUserId,
-      groupId,
-      isGlobal = false,
-      category,
-      sourceMessageId,
-      dedupeStrategy = 'supersede'
-    } = args;
+    const { text, authorUserId, subjectUserId, groupId, isGlobal = false, category } = args;
 
     if (!text || text.trim().length === 0) {
-      return 'Error: text is required to write memory.';
+      throw Error('text is required to write memory.');
     }
 
-    try {
-      const result = await this.insertMemoryWithDedupe({
-        text,
-        authorUserId,
-        subjectUserId,
-        groupId,
-        isGlobal,
-        category,
-        dedupeStrategy
-      });
+    // Search before inserting so the new memory can't show up as its own neighbour.
+    const embedding = await this.getEmbedding(text);
+    const similar = ((await this.queryMemory({ queryText: text, topK: SIMILAR_MEMORY_TOP_K, embedding })) || [])
+      .filter((m: any) => m.score <= SIMILAR_MEMORY_MAX_DISTANCE); // Index uses L2, lower score = more similar
+    const newRow = await this.writeMemory({ text, authorUserId, subjectUserId, groupId, isGlobal, category, embedding });
 
-      if (result.action === 'inserted') return `Saved memory ${result.id}`;
-      if (result.action === 'supersede') return `Saved memory ${result.newId} (superseded ${result.superseded})`;
-      if (result.action === 'overwrite') return `Updated memory ${result.id}`;
-      if (result.action === 'merge') return `Merged into memory ${result.id}`;
-      return `Memory action: ${JSON.stringify(result)}`;
-    } catch (err: any) {
-      console.error('memoryWrite error', err);
-      return `Tool execution error: ${err?.message ?? String(err)}`;
+    if (similar.length === 0) {
+      return `Saved memory ${newRow.id}`;
     }
+    return `Saved memory ${newRow.id}\nOther similar memories to consider updating/deleting:\n` +
+      similar.map((m: any) => `- [${m.memory_id}] (${m.created_at}${m.category ? `, ${m.category}` : ''}) ${m.text}`).join('\n');
+  }
+
+  /**
+   * Wrapper used by the ExtendedDynamicStructuredTool "memory_update".
+   * Replaces the text of an existing memory while keeping its other fields.
+   */
+  async memoryUpdate(memoryId: string, text: string) {
+    const existing = await this.getMemoryById(memoryId);
+    if (!existing) {
+      throw Error(`Memory ${memoryId} not found.`);
+    }
+    await this.updateMemory({
+      memoryId,
+      text,
+      authorUserId: existing.author_user_id,
+      subjectUserId: existing.subject_user_id,
+      groupId: existing.group_id,
+      isGlobal: existing.is_global,
+      category: existing.category
+    });
+    return `Updated memory ${memoryId}`;
   }
 
   /**

@@ -1,3 +1,17 @@
 version: '3.8'
 include:
   - milvus-standalone-docker-compose.yml
+
+services:
+  # Only started with `docker compose --profile bot up -d`, plain `docker compose up` still only starts Milvus.
+  sofia:
+    build: .
+    profiles: ["bot"]
+    restart: unless-stopped
+    # Postgres and Milvus are reached through localhost (published ports / SSH tunnel)
+    network_mode: host
+    tty: true
+    volumes:
+      # Mounted instead of env_file so dotenv parses the quoted values
+      - ./.env:/app/.env:ro
+      - ./assets:/app/assets

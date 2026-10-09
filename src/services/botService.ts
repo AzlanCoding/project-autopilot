@@ -1,6 +1,6 @@
 import P from "pino";
 import { Boom } from '@hapi/boom';
-import makeWASocket, { fetchLatestBaileysVersion, AuthenticationState, CacheStore, DisconnectReason, generateMessageIDV2, isJidNewsletter, proto, getAggregateVotesInPollMessage, BaileysEventEmitter, WAMessage } from 'baileys';
+import makeWASocket, { fetchLatestBaileysVersion, AuthenticationState, CacheStore, DisconnectReason, generateMessageIDV2, isJidNewsletter, proto, getAggregateVotesInPollMessage, BaileysEventEmitter, WAMessage, jidNormalizedUser } from 'baileys';
 import BaileysBottle from 'baileys-bottle-devstroupe';
 import NodeCache from '@cacheable/node-cache';
 import qrcode from 'qrcode-terminal';
@@ -9,11 +9,49 @@ import StoreHandle from "baileys-bottle-devstroupe/lib/bottle/StoreHandle";
 import { BufferSystem } from './bufferSystem';
 import type Store from "./store";
 import type AI from "./ai";
-import { ExtendedDynamicStructuredTool } from "./ai";
-import { SystemMessage } from 'langchain';
-import z from "zod";
+import type { ChatAdapter } from "./ai";
 import { EasyInputMessage, ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
+
+const BOTTLE_STORE_NAME = 'sofia';
+
+/**
+ * Binds the baileys-bottle store with two fixes for lost chat history:
+ * 1. The bottle's handlers look up a chat's message list and create it if missing. When events for the same chat
+ *    are handled concurrently (e.g. history sync chunks and new messages right after logging in), several lists
+ *    get created for one chat and `store.messages.all()` only returns one of them, so the rest looks lost.
+ *    Running the handlers one at a time prevents this.
+ * 2. The bottle drops history sync messages older than 1 day unless the chunk is the latest one, so most of the
+ *    history restored after re-linking was thrown away. Mark every chunk as latest so all of it is kept.
+ */
+export function bindStore(store: StoreHandle, ev: BaileysEventEmitter, logger: P.Logger) {
+  let queue: Promise<unknown> = Promise.resolve();
+  const proxy = Object.create(ev) as BaileysEventEmitter;
+  proxy.on = ((event: string, listener: (data: any) => any) => {
+    return ev.on(event as any, (data: any) => {
+      const arg = event === 'messaging-history.set' ? { ...data, isLatest: true } : data;
+      queue = queue.then(() => listener(arg)).catch(e => logger.error(e, `Store handler for ${event} failed`));
+    });
+  }) as any;
+  store.bind(proxy as any);
+}
+
+/**
+ * Merges duplicate message lists created by the bottle race described in `bindStore`, so history that was split
+ * across them becomes visible again. Duplicate copies of the same message are removed.
+ */
+export async function mergeDuplicateMessageLists(ds: { query: (sql: string) => Promise<any> }) {
+  await ds.query(`
+    WITH ranked AS (
+      SELECT id, MIN(id) OVER (PARTITION BY jid, "dBAuthId") AS keep_id FROM message_dic
+    )
+    UPDATE message SET "dictionaryId" = ranked.keep_id
+    FROM ranked WHERE message."dictionaryId" = ranked.id AND ranked.id <> ranked.keep_id`);
+  await ds.query(`DELETE FROM message_dic d WHERE NOT EXISTS (SELECT 1 FROM message m WHERE m."dictionaryId" = d.id)
+    AND EXISTS (SELECT 1 FROM message_dic k WHERE k.jid = d.jid AND k."dBAuthId" = d."dBAuthId" AND k.id < d.id)`);
+  await ds.query(`DELETE FROM message m USING message o
+    WHERE m."dictionaryId" = o."dictionaryId" AND m."msgId" = o."msgId" AND m.id > o.id`);
+}
 
 export interface PreProccessChatMsg {
   id?: string,
@@ -25,7 +63,7 @@ export interface PreProccessChatMsg {
 
 
 // --- Bot Class Definition ---
-export class SofiaBot {
+export class SofiaBot implements ChatAdapter {
   sock?: ReturnType<typeof makeWASocket>;
   private logger: P.Logger; // Type assertion for local use
   bottle?: Awaited<ReturnType<typeof BaileysBottle.init>>;
@@ -35,6 +73,7 @@ export class SofiaBot {
   store?: StoreHandle;
   bufferSystem: BufferSystem;
   private saveAuthState?: () => Promise<any>;
+  private bottleDataSource?: Awaited<ReturnType<Awaited<ReturnType<typeof BaileysBottle.init>>['createStore']>>['_ds'];
 
 
   constructor(loggerInstance: P.Logger, ai: AI, db: Store) {
@@ -42,70 +81,7 @@ export class SofiaBot {
     this.bufferSystem = new BufferSystem(loggerInstance);
     this.ai = ai;
     this.db = db;
-    this.ai.sendMessageTool = new ExtendedDynamicStructuredTool({
-      name: "send_message",
-      description: "Send a message to a chat or a group chat based on a user id or group id (ending with `@g.us`).",
-      schema: z.object({
-        id: z.string().describe("[Required] The user id or group id to send the chat to. E.g,`467793d9-6b60-45e7-9fbc-a202ef40837f` or `12345678@g.us`"),
-        text: z.string().min(1).describe("The message to send."),
-      }),
-      func: async (args) => {
-        const { id, text } = args as any;
-        if (id.endsWith('@g.us')) {
-          const replyMsg: WAMessage = {
-            message: {
-              conversation: `I am an AI Agent`
-            },
-            key: {
-              id: 'autoCmd' + Math.floor(process.uptime()),
-              remoteJid: id,
-              fromMe: false,
-              participant: this.sock!.user?.lid,
-            },
-            messageTimestamp: Math.floor((new Date()).getTime() / 1000),
-            pushName: 'Sofia',
-            broadcast: false,
-          };
-          await this.sock?.sendMessage(id, { text }, { quoted: replyMsg });
-        }
-        else {
-          const user = await this.db.user.findById(id);
-          if (!user) {
-            throw Error(`Unknown user with id ${id}`)
-          }
-          const replyMsg: WAMessage = {
-            message: {
-              conversation: `I am an AI Agent`
-            },
-            key: {
-              id: 'autoCmd' + Math.floor(process.uptime()),
-              remoteJid: '120364402285813629@g.us', // Random Group ID, probably invalid
-              fromMe: false,
-              participant: this.sock!.user?.lid,
-            },
-            messageTimestamp: Math.floor((new Date()).getTime() / 1000),
-            pushName: 'Sofia',
-            broadcast: false,
-          };
-          await this.sock?.sendMessage(user.whatsapp_jid, { text }, { quoted: replyMsg });
-        }
-        return "Message Sent";
-      }
-    }, "{id: string, text: string}")
-    this.ai.tools.push(this.ai.sendMessageTool);
-    this.ai.listGroupsTool = new ExtendedDynamicStructuredTool({
-      name: 'list_groups',
-      description: 'List all of the group chats that you have access to.',
-      schema: z.object({}),
-      func: async (args) => {
-        return JSON.stringify(Object.values(await this.sock!.groupFetchAllParticipating()).map(g => ({
-          id: g.id, name: g.subject//, description: g.desc 
-        })));
-      }
-    }, "{}");
-    this.ai.tools.push(this.ai.listGroupsTool);
-
-    this.ai.bindModel();
+    this.ai.registerChatTools(this);
   }
 
   async connect(force: boolean = false): Promise<void> {
@@ -132,8 +108,15 @@ export class SofiaBot {
     const { version, isLatest } = await fetchLatestBaileysVersion();
     this.logger.info(`Using WhatsApp v${version.join('.')}, isLatest: ${isLatest}`);
 
-    const { auth, store } = await this.bottle.createStore('sofia');
+    const { auth, store, _ds } = await this.bottle.createStore(BOTTLE_STORE_NAME);
     this.store = store;
+    this.bottleDataSource = _ds;
+    try {
+      await mergeDuplicateMessageLists(_ds);
+    }
+    catch (e) {
+      this.logger.error(e, 'Failed to merge duplicate message lists');
+    }
     const { state: authState, saveState: saveAuthState } = await auth.useAuthHandle();
     this.authState = authState as AuthenticationState;
     this.saveAuthState = saveAuthState;
@@ -144,9 +127,11 @@ export class SofiaBot {
       auth: authState as AuthenticationState,
       generateHighQualityLinkPreview: true,
       msgRetryCounterCache,
+      // Keep every history sync chunk (Baileys skips FULL syncs by default) so history is restored after re-linking.
+      shouldSyncHistoryMessage: () => true,
     });
 
-    store.bind(this.sock.ev as any);
+    bindStore(store, this.sock.ev, this.logger);
 
     // ------------------------------------------------------------------
     // Event Handling Logic
@@ -155,6 +140,16 @@ export class SofiaBot {
     // ------------------------------------------------------------------
 
     this.logger.info("Bot connection setup complete. Awaiting WA events...");
+  }
+
+  /**
+   * Clears the stored WhatsApp credentials while keeping the chats, contacts and messages linked to the store.
+   */
+  async resetAuthCredentials() {
+    if (!this.bottleDataSource) {
+      return;
+    }
+    await this.bottleDataSource.getRepository('Auth').update({ key: BOTTLE_STORE_NAME }, { value: '' });
   }
 
   private setupEventHandlers() {
@@ -172,7 +167,11 @@ export class SofiaBot {
               this.logger.warn("Connection lost, attempting to reconnect...");
               setTimeout(() => this.connect(true), 5000); // Use setTimeout instead of direct recursive call
             } else {
-              this.logger.fatal('Connection closed. You are logged out.');
+              // Only reset the credentials. Deleting the bottle's auth row to re-link would cascade delete
+              // every stored chat and message, which wipes Sofia's chat history.
+              this.logger.fatal('Connection closed. You are logged out. Clearing credentials, scan the new QR code to log in again.');
+              await this.resetAuthCredentials();
+              setTimeout(() => this.connect(true), 5000);
             }
           }
 
@@ -226,6 +225,8 @@ export class SofiaBot {
                     if (msg.key.remoteJid) {
                       await this.sock!.presenceSubscribe(msg.key.remoteJid); // Subscribe to precense updates so that it can see who is typing...
                       await this.sock!.readMessages([msg.key]);
+                      // The sender just sent a message so they are no longer typing.
+                      this.bufferSystem.setTyping(msg.key.remoteJid, msg.key.participant || msg.key.remoteJid, false);
                       this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
                         try {
                           await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
@@ -354,13 +355,13 @@ export class SofiaBot {
           const precense = events['presence.update']
           // console.dir(precense)
           this.logger.info(precense, "GOT PRESENCE")
-          if (!precense.id.endsWith('@g.us') && this.bufferSystem.chatBuffers[precense.id]) {
-            if (Object.values(precense.presences).some(p => p.lastKnownPresence == 'composing')) {
-              this.bufferSystem.pauseBuffer(precense.id);
+          // Each update only contains the participants whose presence changed, so track them individually.
+          const ownJids = [this.sock?.user?.id, this.sock?.user?.lid].filter(j => j).map(j => jidNormalizedUser(j!));
+          for (const [participant, p] of Object.entries(precense.presences)) {
+            if (ownJids.includes(jidNormalizedUser(participant))) {
+              continue;
             }
-            else {
-              this.bufferSystem.resumeBuffer(precense.id);
-            }
+            this.bufferSystem.setTyping(precense.id, participant, p.lastKnownPresence == 'composing' || p.lastKnownPresence == 'recording');
           }
         }
 
@@ -398,8 +399,8 @@ export class SofiaBot {
       return [];
     }
 
-    let messages = await this.store.messages.all(remoteJidAlt || remoteJid)
-    if (remoteJidAlt) {
+    let messages = (await this.store.messages.all(remoteJidAlt || remoteJid)) || []
+    if (remoteJidAlt && remoteJidAlt != remoteJid) {
       messages = [...messages, ...((await this.store.messages.all(remoteJid)) || [])]
     }
     const parseMentions = async (m: WAMessage | proto.IMessage, text?: string | null) => {
@@ -455,24 +456,62 @@ export class SofiaBot {
     }
   }
 
+  // ------------------------------------------------------------------
+  // ChatAdapter implementation (used by the AI chat tools)
+  // ------------------------------------------------------------------
+
   /**
-   * Sends a text message to a specific JID.
-   * @param remoteJid The recipient's JID (e.g., '1234567890@s.whatsapp.net')
-   * @param text The message content.
+   * Sends a text message to a user id or group id (ending with `@g.us`).
    */
-  public async sendMessage(remoteJid: string, text: string): Promise<void> {
+  public async sendMessage(id: string, text: string): Promise<void> {
     if (!this.sock) {
-      this.logger.error("Bot is not connected. Call connect() first.");
-      return;
+      throw Error("Bot is not connected.");
     }
-    this.logger.info(`Attempting to send message to ${remoteJid}`);
-    try {
-      await this.sock.sendMessage(remoteJid, { text: text });
-      this.logger.info(`Successfully sent message to ${remoteJid}`);
-    } catch (error) {
-      this.logger.error(error, `Failed to send message to ${remoteJid}`);
-      // Do not throw here if we want the bot to keep running on send failure
+    let jid = id;
+    if (!id.endsWith('@g.us')) {
+      const user = await this.db.user.findById(id);
+      if (!user) {
+        throw Error(`Unknown user with id ${id}`)
+      }
+      jid = user.whatsapp_jid;
     }
+    const replyMsg: WAMessage = {
+      message: {
+        conversation: `I am an AI Agent`
+      },
+      key: {
+        id: 'autoCmd' + Math.floor(process.uptime()),
+        remoteJid: id.endsWith('@g.us') ? id : '120364402285813629@g.us', // Random Group ID, probably invalid
+        fromMe: false,
+        participant: this.sock.user?.lid,
+      },
+      messageTimestamp: Math.floor((new Date()).getTime() / 1000),
+      pushName: 'Sofia',
+      broadcast: false,
+    };
+    await this.sock.sendMessage(jid, { text }, { quoted: replyMsg });
+  }
+
+  public async listGroups(): Promise<{ id: string, name: string }[]> {
+    return Object.values(await this.sock!.groupFetchAllParticipating()).map(g => ({
+      id: g.id, name: g.subject//, description: g.desc
+    }));
+  }
+
+  /**
+   * Loads chat history by user id or group id. Messages from a user are stored under their phone number JID,
+   * while messages sent to them may be stored under their LID, so both are loaded.
+   */
+  public async loadChatById(id: string): Promise<PreProccessChatMsg[]> {
+    if (id.endsWith('@g.us')) {
+      return this.loadChat(id);
+    }
+    const user = await this.db.user.findById(id);
+    if (!user) {
+      throw Error(`Unknown user with id ${id}`);
+    }
+    const lid = await this.sock?.signalRepository.lidMapping.getLIDForPN(user.whatsapp_jid);
+    return this.loadChat(lid || user.whatsapp_jid, user.whatsapp_jid);
   }
 }
 
