@@ -77,8 +77,8 @@ export class SofiaBot implements ChatAdapter {
   db: Store;
   store?: StoreHandle;
   bufferSystem: BufferSystem;
-  /** Group chat id -> timestamp of the newest message judged by `shouldReplyInGroup`. */
-  private lastJudgedAt: { [chatId: string]: number } = {};
+  /** Chat id -> the newest message Sofia has seen (replied to, chose not to reply to, or saw mid-reply). In memory only. */
+  private lastSeen: { [chatId: string]: { id?: string, time: number } | undefined } = {};
   private saveAuthState?: () => Promise<any>;
   private bottleDataSource?: Awaited<ReturnType<Awaited<ReturnType<typeof BaileysBottle.init>>['createStore']>>['_ds'];
 
@@ -242,20 +242,26 @@ export class SofiaBot implements ChatAdapter {
                       this.bufferSystem.setTyping(msg.key.remoteJid, msg.key.participant || msg.key.remoteJid, false);
                       this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
                         const isGroup = msg.key.remoteJid!.endsWith('@g.us');
-                        // In group chats, only show typing once Sofia has decided to reply.
-                        let stopTyping = isGroup ? undefined : this.keepTyping(msg.key.remoteJid!);
+                        let stopTyping: (() => Promise<void>) | undefined;
                         try {
                           const chatHistory = await this.loadChat(msg.key.remoteJid!, msg.key.remoteJidAlt);
-                          if (chatHistory.length && chatHistory[chatHistory.length - 1].user != 'AI') {
+                          const unseen = this.unseenMessages(msg.key.remoteJid!, chatHistory);
+                          this.markSeen(msg.key.remoteJid!, chatHistory);
+                          if (unseen.messages.length) {
+                            let replyHint: string | undefined;
                             if (isGroup) {
-                              const decision = await this.shouldReplyInGroup(msg.key.remoteJid!, chatHistory);
+                              const decision = await this.shouldReplyInGroup(chatHistory, unseen.known ? unseen.messages : []);
+                              if (decision.short) {
+                                replyHint = 'The latest message is just a small thanks, acknowledgement or sign-off to you. Reply with one short message (or just a sticker or GIF), do not start a new topic.';
+                              }
                               if (!decision.reply) {
                                 this.logger.info(`Not replying in ${msg.key.remoteJid}: ${decision.reason}`);
                                 return;
                               }
-                              stopTyping = this.keepTyping(msg.key.remoteJid!);
                             }
-                            let [chatHistoryParsed, lastMsgId] = (await this.db.user.formatAndMergeMessages(chatHistory, 12)); // Limit to 12 messages.
+                            // Only show typing once Sofia has decided to reply.
+                            stopTyping = this.keepTyping(msg.key.remoteJid!);
+                            let [chatHistoryParsed, lastMsgId] = await this.formatHistory(chatHistory, unseen.messages);
                             this.logger.trace(chatHistoryParsed);
                             let systemPrompt;
                             if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
@@ -279,7 +285,8 @@ export class SofiaBot implements ChatAdapter {
                             const streamGenerator = this.ai.processChatv3([{
                               role: 'system',
                               content: systemPrompt
-                            } as EasyInputMessage, ...(chatHistoryParsed as Array<ResponseInputItem>)]);
+                            } as EasyInputMessage, ...(chatHistoryParsed as Array<ResponseInputItem>), ...(replyHint ? [{ role: 'system', content: replyHint } as EasyInputMessage] : [])],
+                              undefined, {}, () => this.messagesDuringReply(msg.key.remoteJid!, msg.key.remoteJidAlt));
 
                             const replyMsg: WAMessage = {
                               message: {
@@ -389,11 +396,82 @@ export class SofiaBot implements ChatAdapter {
     };
   }
 
+  /** The messages after `seen` in a chat history (by id, or by time if that message is not in the history). */
+  private messagesAfter(history: PreProccessChatMsg[], seen: { id?: string, time: number }) {
+    const index = seen.id ? history.findIndex(m => m.id == seen.id) : -1;
+    return index >= 0 ? history.slice(index + 1) : history.filter(m => m.time > seen.time);
+  }
+
   /**
-   * Decides whether Sofia should reply to the new messages in a group chat, see `decideGroupReply`.
-   * Remembers the newest judged message per chat so messages Sofia chose not to reply to are not judged again.
+   * Messages from others that Sofia has not seen yet. These can sit between Sofia's own messages when they were sent while
+   * she was replying. Without a record for the chat (e.g. after a restart) it falls back to the messages after Sofia's
+   * last message, and `known` is false.
    */
-  private async shouldReplyInGroup(chatId: string, chatHistory: PreProccessChatMsg[]): Promise<ReplyDecision> {
+  unseenMessages(chatId: string, history: PreProccessChatMsg[]): { messages: PreProccessChatMsg[], known: boolean } {
+    const seen = this.lastSeen[chatId];
+    if (!seen) {
+      let start = history.length;
+      while (start > 0 && history[start - 1].user != 'AI') {
+        start--;
+      }
+      return { messages: history.slice(start), known: false };
+    }
+    return { messages: this.messagesAfter(history, seen).filter(m => m.user != 'AI'), known: true };
+  }
+
+  /** Records the newest message in `history` as seen by Sofia. */
+  markSeen(chatId: string, history: PreProccessChatMsg[]) {
+    const newest = history[history.length - 1];
+    if (newest) {
+      this.lastSeen[chatId] = { id: newest.id, time: newest.time };
+    }
+  }
+
+  /**
+   * Formats the chat history for the model. Unseen messages sent while Sofia was still replying sit before the end of
+   * her reply, which makes them look answered, so they are moved after it with a note.
+   */
+  async formatHistory(history: PreProccessChatMsg[], unseen: PreProccessChatMsg[]): Promise<[ResponseInputItem[], string?]> {
+    const unseenSet = new Set(unseen);
+    const firstUnseen = history.findIndex(m => unseenSet.has(m));
+    const interleaved = firstUnseen >= 0 && history.slice(firstUnseen).some(m => m.user == 'AI');
+    if (!interleaved) {
+      return this.db.user.formatAndMergeMessages(history, 12); // Limit to 12 messages.
+    }
+    const [earlier] = await this.db.user.formatAndMergeMessages(history.filter(m => !unseenSet.has(m)), 12);
+    const [later, lastMsgId] = await this.db.user.formatAndMergeMessages(unseen, 12);
+    return [[
+      ...earlier,
+      { role: 'system', content: "The messages below were sent while you were still replying, so you hadn't seen them yet.", type: 'message' } as EasyInputMessage,
+      ...later,
+    ], lastMsgId];
+  }
+
+  /**
+   * Called by `processChatv3` after tool calls: returns messages sent in the chat since Sofia started replying (with a
+   * note) so she can answer them in the same reply, instead of the queued buffer run replying again afterwards.
+   */
+  async messagesDuringReply(chatId: string, chatIdAlt?: string | null): Promise<ResponseInputItem[]> {
+    const history = await this.loadChat(chatId, chatIdAlt || undefined);
+    const fresh = this.unseenMessages(chatId, history);
+    if (!fresh.known || !fresh.messages.length) {
+      return [];
+    }
+    this.markSeen(chatId, history);
+    const [formatted] = await this.db.user.formatAndMergeMessages(fresh.messages, 12);
+    const groupNote = chatId.endsWith('@g.us') ? " (in a group chat, only if they're meant for you)" : '';
+    return [
+      { role: 'system', content: `New messages arrived while you were replying. You haven't responded to them yet. Answer them in this reply if they need it${groupNote}.`, type: 'message' } as EasyInputMessage,
+      ...formatted,
+    ];
+  }
+
+  /**
+   * Decides whether Sofia should reply to the `unseen` messages in a group chat, see `decideGroupReply`.
+   * With no `unseen` messages given (e.g. after a restart), only the latest messages are judged.
+   */
+  private async shouldReplyInGroup(chatHistory: PreProccessChatMsg[], unseen: PreProccessChatMsg[]): Promise<ReplyDecision> {
+    const unseenSet = new Set(unseen);
     const recent = chatHistory.slice(-40);
     const names = new Map<string, Promise<string>>();
     const getName = (jid: string) => {
@@ -409,10 +487,10 @@ export class SofiaBot implements ChatAdapter {
       quotedMessage: m.quotedMessage,
       mentionsAI: m.mentionsAI,
       quotesAI: m.quotesAI,
+      isNew: unseenSet.has(m),
     })));
-    const decision = await decideGroupReply(messages, this.lastJudgedAt[chatId]);
-    this.lastJudgedAt[chatId] = recent[recent.length - 1].time;
-    this.logger.info({ chatId, reply: decision.reply, reason: decision.reason, answers: decision.answers }, 'Group reply decision');
+    const decision = await decideGroupReply(messages);
+    this.logger.info({ reply: decision.reply, reason: decision.reason, answers: decision.answers }, 'Group reply decision');
     return decision;
   }
 

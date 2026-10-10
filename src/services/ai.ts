@@ -1196,10 +1196,15 @@ ${await message()}`,
   //   }
   // }
 
+  /**
+   * @param getNewMessages Called after tool calls, before the model continues. Returns messages that arrived in the chat
+   * since the reply started (with a note), which are added to the history so Sofia can answer them in the same reply.
+   */
   async * processChatv3(
     chatHistory: Array<ResponseInputItem>,
     userInput?: string,
-    additionalOptions: Partial<ResponseCreateParamsStreaming> = {}
+    additionalOptions: Partial<ResponseCreateParamsStreaming> = {},
+    getNewMessages?: () => Promise<ResponseInputItem[]>
   ) {
     // Add user message to history if provided
     if (userInput) {
@@ -1266,8 +1271,7 @@ ${await message()}`,
       //   });
 
 
-      // We'll accumulate the full assistant text and a small buffer for chunked yields
-      let fullResponseContent = "";
+      // Small buffer for chunked yields
       let buffer = "";
 
       // // Helper to flush buffer as chunk_display
@@ -1406,6 +1410,14 @@ ${await message()}`,
               }
 
             }
+            else if (event.item.type == 'message') {
+              // Keep text Sofia already sent in the history for the request after a tool call. Without it the model thinks
+              // it has not replied yet and writes a whole new reply, so the user gets the same answer twice.
+              const text = event.item.content.map(c => c.type == 'output_text' ? c.text : '').join('');
+              if (text.trim()) {
+                chatHistory.push({ role: 'assistant', content: text, type: 'message' } as EasyInputMessage);
+              }
+            }
             else if (event.item.type == 'reasoning') {
               chatHistory.push({
                 id: event.item.id,
@@ -1421,7 +1433,6 @@ ${await message()}`,
           else if (event.type == "response.output_text.delta") {
             // 📡 NORMAL STREAMING (unchanged)
             const chunkText = (event.delta || "") as string;
-            fullResponseContent += chunkText;
             buffer += chunkText;
 
             if (buffer.includes("\n\n")) {
@@ -1439,6 +1450,16 @@ ${await message()}`,
 
         if (hasToolCalls) {
           instance.logger.trace("RECALLING!!!")
+          try {
+            const newMessages = await getNewMessages?.() ?? [];
+            if (newMessages.length) {
+              instance.logger.info(`Adding ${newMessages.length} items that arrived during the reply`);
+              chatHistory.push(...newMessages);
+            }
+          }
+          catch (e) {
+            instance.logger.error(e, 'Failed to load messages that arrived during the reply');
+          }
           yield* handleStream(instance);
           return;
         }
@@ -1460,16 +1481,7 @@ ${await message()}`,
         };
       }
 
-      // Persist final AI response into chatHistory
-      chatHistory.push(
-        {
-          role: 'assistant',
-          content: fullResponseContent,
-          type: 'message'
-        } as EasyInputMessage
-        // new AIMessage(fullResponseContent)
-      );
-
+      // Sofia's replies were added to chatHistory as each message finished (see `response.output_item.done` above)
       // Return final chatHistory
       yield {
         type: "done",

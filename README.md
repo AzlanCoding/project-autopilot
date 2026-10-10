@@ -41,6 +41,7 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 
 ## Important Notes
 *   When messages are scheduled to be sent, the messages should only be written when they are scheduled so that any context of new memory can be used.    
+*   When changing `src/static/prompts/system.md`, add an entry to `src/static/prompts/changelog.json` with the time the change goes live and what Sofia should do differently. A note is inserted into her chat history at that point so she stops copying the style of her older messages.
     
   
 ## Running

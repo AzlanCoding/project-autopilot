@@ -5,6 +5,7 @@ import { PreProccessChatMsg } from './botService';
 import { formatDateTime } from '../utils/common';
 import { EasyInputMessage, ResponseInputItem } from 'openai/resources/responses/responses.js';
 import Store from './store';
+import { loadPromptChanges, promptChangeNote } from '../utils/promptChangelog';
 
 type UserCreateInput = Omit<InferCreationAttributes<User>, 'id'>;
 type UserAttributes = InferAttributes<User>;
@@ -13,6 +14,8 @@ export class UserService {
   private store: Store;
   private db: Sequelize;
   private Model: ModelStatic<User>;
+  /** Path of the system prompt changelog, see `loadPromptChanges`. */
+  promptChangelogPath?: string;
 
   constructor(store: Store) {
     this.store = store
@@ -75,6 +78,18 @@ export class UserService {
     const results: ResponseInputItem[] = [];
     let i = 0;
 
+    // Prompt changes after the first message are inserted where they happened, changes older than the whole history are
+    // not needed since every message was written under the current prompt.
+    const firstTime = messages[0].time;
+    const promptChanges = (await loadPromptChanges(this.promptChangelogPath)).filter(c => c.time > firstTime);
+    const notes = new Set<ResponseInputItem>();
+    const pushPromptChange = () => {
+      const note = { role: 'system', content: promptChangeNote(promptChanges.shift()!, formatDateTime), type: 'message' } as EasyInputMessage;
+      notes.add(note);
+      results.push(note);
+      limit++;
+    };
+
     let lastMsgId;
 
     while (i < newMessages.length) {
@@ -86,6 +101,9 @@ export class UserService {
         continue;
       }
       currentMessage = currentMessage as PreProccessChatMsg;
+      while (promptChanges.length && promptChanges[0].time <= currentMessage.time) {
+        pushPromptChange();
+      }
       let mergedMessages = [currentMessage];
       let j = i + 1;
 
@@ -139,7 +157,16 @@ export class UserService {
       i = j;
     }
 
-    return [results.slice(limit * -1), lastMsgId];
+    while (promptChanges.length) {
+      pushPromptChange();
+    }
+
+    const window = results.slice(limit * -1);
+    // A note at the start of the window has no older messages before it to explain
+    while (window.length && notes.has(window[0])) {
+      window.shift();
+    }
+    return [window, lastMsgId];
   }
 
   // Example Usage (for testing/demonstration)

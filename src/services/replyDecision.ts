@@ -18,11 +18,15 @@ export interface DecisionMsg {
   mentionsAI?: boolean,
   /** The message replies to (quotes) one of Sofia's messages. */
   quotesAI?: boolean,
+  /** Sofia has not seen this message yet. When no message is marked, the messages after Sofia's last message are new. */
+  isNew?: boolean,
 }
 
 export interface ReplyDecision {
   reply: boolean,
   reason: string,
+  /** The message is a small acknowledgement or sign-off (thanks, ok, good night), Sofia should keep her reply short. */
+  short?: boolean,
   answers?: DecisionAnswers,
 }
 
@@ -63,6 +67,8 @@ export interface DecisionAnswers {
 
 /** Message kinds Sofia replies to when the message is meant for her. */
 const REPLY_KINDS_TO_SOFIA = ['school_question', 'social_question', 'request', 'emotional'];
+/** Sofia only replies to acknowledgements that are clearly meant for her, not e.g. everyone saying "noted" to an announcement. */
+const ACKNOWLEDGEMENT_MIN_P_SOFIA = 0.8;
 
 function formatMsg(m: DecisionMsg) {
   const time = new Date(m.time * 1000).toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Singapore' });
@@ -86,8 +92,11 @@ export function decideFromAnswers(a: DecisionAnswers, { quotesAI = false, sofiaR
   const kind = a.kind.probabilities;
   const toSofia = quotesAI || (a.addressee.probabilities.sofia ?? 0) >= 0.5 || (sofiaRecent && a.continues_sofia_thread.noul >= 0.7);
   if (toSofia) {
-    const pReply = REPLY_KINDS_TO_SOFIA.reduce((t, k) => t + (kind[k] ?? 0), 0);
-    return { reply: pReply >= 0.5, reason: `to Sofia, kind=${a.kind.choice} (${pReply.toFixed(2)} reply-worthy)`, answers: a };
+    const pSofia = a.addressee.probabilities.sofia ?? 0;
+    const clearlyToSofia = quotesAI || pSofia >= ACKNOWLEDGEMENT_MIN_P_SOFIA;
+    const pReply = REPLY_KINDS_TO_SOFIA.reduce((t, k) => t + (kind[k] ?? 0), 0) + (clearlyToSofia ? kind.acknowledgement ?? 0 : 0);
+    const short = clearlyToSofia && a.kind.choice == 'acknowledgement';
+    return { reply: pReply >= 0.5, short, reason: `to Sofia, kind=${a.kind.choice} (${pReply.toFixed(2)} reply-worthy)`, answers: a };
   }
   if (a.addressee.choice == 'whole_group' || a.addressee.choice == 'nobody') {
     const reply = (kind.school_question ?? 0) >= 0.5 && a.sofia_can_help.noul >= 0.6;
@@ -112,20 +121,30 @@ export async function askDecisionModel(messages: DecisionMsg[], signal?: AbortSi
 }
 
 /**
- * Splits the messages after Sofia's last message (and after `since`, the newest message already judged) into blocks of
- * consecutive messages from the same sender. Each block is judged with the transcript before it, the latest 3 are kept.
+ * Splits the new messages into blocks of consecutive messages from the same sender, each judged with the transcript before
+ * it. New messages are the ones marked `isNew` (these can sit between Sofia's messages when they were sent while she was
+ * replying), the latest 3 blocks are kept. If none are marked (e.g. after a restart), only the latest block after Sofia's
+ * last message is judged so old messages are not answered.
  * The last message of each returned array is the one being judged (a block is merged into one message).
  */
-export function newMessageBlocks(messages: DecisionMsg[], since?: number): DecisionMsg[][] {
-  let start = messages.length;
-  while (start > 0 && messages[start - 1].speaker != null && (since == undefined || messages[start - 1].time > since)) {
-    start--;
+export function newMessageBlocks(messages: DecisionMsg[]): DecisionMsg[][] {
+  const marked = messages.some(m => m.isNew);
+  const isNew = (i: number) => messages[i].speaker != null && (!marked || messages[i].isNew);
+  let i = 0;
+  if (!marked) {
+    i = messages.length;
+    while (i > 0 && messages[i - 1].speaker != null) {
+      i--;
+    }
   }
   const blocks: DecisionMsg[][] = [];
-  let i = start;
   while (i < messages.length) {
+    if (!isNew(i)) {
+      i++;
+      continue;
+    }
     let j = i + 1;
-    while (j < messages.length && messages[j].speaker == messages[i].speaker) {
+    while (j < messages.length && isNew(j) && messages[j].speaker == messages[i].speaker) {
       j++;
     }
     const block = messages.slice(i, j);
@@ -139,22 +158,27 @@ export function newMessageBlocks(messages: DecisionMsg[], since?: number): Decis
     blocks.push([...messages.slice(Math.max(0, i - 12), i), merged]);
     i = j;
   }
-  // Without a previous judgement (e.g. after a restart), only judge the latest block so old messages are not answered.
-  return since == undefined ? blocks.slice(-1) : blocks.slice(-3);
+  return marked ? blocks.slice(-3) : blocks.slice(-1);
 }
 
+/** Whether a message says Sofia's name. */
+export const NAMES_SOFIA = /\bsofia\b/i;
+
 /**
- * Decides whether Sofia should reply to the new messages in a group chat. A direct @mention always gets a reply, every
- * other new block of messages is judged by the decision model and Sofia replies if any of them call for it.
- * Falls back to replying when a new message contains "sofia" if the decision model fails.
+ * Decides whether Sofia should reply to the new messages in a group chat. A direct @mention or saying "sofia" always gets
+ * a reply, every other new block of messages is judged by the decision model and Sofia replies if any of them call for it.
+ * Falls back to replying to replies to Sofia's messages if the decision model fails.
  */
-export async function decideGroupReply(messages: DecisionMsg[], since?: number): Promise<ReplyDecision> {
-  const blocks = newMessageBlocks(messages, since);
+export async function decideGroupReply(messages: DecisionMsg[]): Promise<ReplyDecision> {
+  const blocks = newMessageBlocks(messages);
   if (blocks.length == 0) {
     return { reply: false, reason: 'no new messages' };
   }
   if (blocks.some(b => b[b.length - 1].mentionsAI)) {
     return { reply: true, reason: '@mentioned' };
+  }
+  if (blocks.some(b => NAMES_SOFIA.test(b[b.length - 1].text))) {
+    return { reply: true, reason: 'named' };
   }
   try {
     const decisions = await Promise.all(blocks.map(async b => decideFromAnswers(await askDecisionModel(b), {
@@ -164,8 +188,8 @@ export async function decideGroupReply(messages: DecisionMsg[], since?: number):
     return decisions.find(d => d.reply) ?? decisions[decisions.length - 1];
   }
   catch (e) {
-    const reply = blocks.some(b => b[b.length - 1].quotesAI || b[b.length - 1].text.toLowerCase().includes('sofia'));
-    return { reply, reason: `decision model failed, fell back to name check: ${(e as Error).message}` };
+    const reply = blocks.some(b => b[b.length - 1].quotesAI);
+    return { reply, reason: `decision model failed, fell back to replying to replies to Sofia: ${(e as Error).message}` };
   }
 }
 
