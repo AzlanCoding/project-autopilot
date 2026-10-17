@@ -56,15 +56,15 @@ Structure the message exactly like this:
 *🤖 Applied AI & Operations* — IT2122 Applied Deep Learning, IT2123 Applied Machine Learning, IT2124 Machine Learning Operations
 *☁️ DevOps & Automation in the Cloud* — IT2125 Cloud Architecture, IT2126 Cloud Development, IT2127 Cloud Operations
 *🔐 Cybersecurity* — IT2128 Application Security, IT2129 Cybersecurity Attack & Defence, IT2130 Cyber Forensic Technologies & Process
-3. Under each heading, one bullet per timetable block, in time order, keeping every detail from the timetable:
+3. Under each heading, one bullet per timetable block, in time order, then any (ELEARN) blocks at the end of the section, keeping every detail from the timetable:
 - 09:00 - 11:50 · IT2122 Applied Deep Learning · LAB02 · Room L.532
 4. Blocks marked (ELEARN) have no time. Write them like this, and never give them a time:
-- IT2121 Responsible AI for Sustainability · LEC01 · e-learning, do it anytime today
+- IT2121 Responsible AI for Sustainability · LEC01 · e-learning
 E-learning is own pace, own target, for everybody.
 5. If a section has no blocks today, write exactly:
 - No lessons for today
 Never say "no on-campus lesson" — there may still be e-learning.
-6. Close with one warm encouraging line.
+6. Close with one warm encouraging line. Don't mention about e-learning.
 
 Accuracy rule (most important): transcribe EVERY block from the timetable exactly once per section, with its module code, times, section and room. Do not merge sections, paraphrase away or drop any lesson. Before sending, count the blocks in each section of the timetable and the bullets in that section of your message — they must match. Never invent a lesson that is not in the timetable.
 
