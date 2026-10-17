@@ -15,7 +15,7 @@ import { z } from "zod";
 import { OpenAI } from "openai";
 // import { ChatOllama } from '@langchain/ollama'
 import Store from './store';
-import { describeDateWeek, formatDateTime, getTime, parseTimestamp, SEMESTERS, WK_Number_to_timeframe } from '../utils/common';
+import { describeDateWeek, formatDateTime, messageBreakIndex, getTime, parseTimestamp, SEMESTERS, WK_Number_to_timeframe } from '../utils/common';
 import { User } from '../models/User';
 import { ScheduledTask } from '../models/ScheduledTask';
 import type { PreProccessChatMsg } from './botService';
@@ -1484,14 +1484,14 @@ ${await message()}`,
                   result = `Error: Unknown tool "${event.item.name}"`;
                 } else {
 
-                  if (buffer) {
+                  if (buffer.trim()) {
                     yield {
                       type: "chunk_display",
                       content: buffer,
                       delimiter: false,
                     };
-                    buffer = "";
                   }
+                  buffer = "";
 
                   // parse args safely (if present)
                   const args2 = JSON.parse(event.item.arguments || '{}') ?? {};
@@ -1565,15 +1565,17 @@ ${await message()}`,
             const chunkText = (event.delta || "") as string;
             buffer += chunkText;
 
-            if (buffer.includes("\n\n")) {
-              let text = buffer.slice(0, buffer.indexOf("\n\n"));
-              buffer = buffer.slice(buffer.indexOf("\n\n") + 2);
-
-              yield {
-                type: "chunk_display",
-                content: text,
-                delimiter: true,
-              };
+            // Each blank line starts a new WhatsApp message, except inside a ``` code block (kept in one message)
+            for (let breakAt = messageBreakIndex(buffer); breakAt >= 0; breakAt = messageBreakIndex(buffer)) {
+              const text = buffer.slice(0, breakAt);
+              buffer = buffer.slice(breakAt + 2);
+              if (text.trim()) {
+                yield {
+                  type: "chunk_display",
+                  content: text,
+                  delimiter: true,
+                };
+              }
             }
           }
         }
@@ -1603,10 +1605,10 @@ ${await message()}`,
         // The response ended with text only. If it says Sofia is about to do something, she stopped before doing it.
         if (!nudged && responseText.trim()) {
           // Send the rest of the text first so the check doesn't delay it
-          if (buffer) {
+          if (buffer.trim()) {
             yield { type: "chunk_display", content: buffer, delimiter: false };
-            buffer = "";
           }
+          buffer = "";
           let p = 0;
           try {
             p = await (instance.aboutToAct ?? aboutToActProbability)(responseText.trim());
@@ -1631,7 +1633,7 @@ ${await message()}`,
 
 
       // 🧩 Flush remaining buffer
-      if (buffer) {
+      if (buffer.trim()) {
         yield {
           type: "chunk_display",
           content: buffer,

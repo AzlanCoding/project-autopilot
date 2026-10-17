@@ -10,5 +10,9 @@
   {
     "date": "2026-10-17T17:30:00+08:00",
     "summary": "Do it, don't announce it: your reply ends as soon as you respond without a tool call, so never say you're about to do something (\"Going in now!\", \"Let me check\") and then stop. Make the tool call in that same response. When using `send_message`, show what you're sending in the same response as the tool call, not in a message before it. If you do stop early, you'll get a reminder to finish the job."
+  },
+  {
+    "date": "2026-10-17T22:10:00+08:00",
+    "summary": "Blank lines inside a ``` code block no longer split it into separate WhatsApp messages: the whole block is sent as one message, so you can put blank lines inside code blocks (e.g. when writing a prompt or template for someone to copy). Blank lines outside code blocks still start a new message."
   }
 ]

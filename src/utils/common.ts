@@ -175,3 +175,29 @@ export function toUnixSeconds(ts: unknown): number {
   const n = Number(ts);
   return isNaN(n) ? 0 : n;
 }
+
+/**
+ * Index of the first blank line (`\n\n`) in `text` that is outside a ``` code block, or -1. Each blank line in Sofia's
+ * reply starts a new WhatsApp message, but splitting inside a code block would cut the block into several messages.
+ */
+export function messageBreakIndex(text: string): number {
+  for (let i = text.indexOf('\n\n'); i >= 0; i = text.indexOf('\n\n', i + 2)) {
+    // An even number of ``` before the blank line means every code block before it is closed
+    if ((text.slice(0, i).split('```').length - 1) % 2 == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Splits a reply into the WhatsApp messages it is sent as (at blank lines outside code blocks), without empty ones. */
+export function splitIntoMessages(text: string): string[] {
+  const messages: string[] = [];
+  let rest = text;
+  for (let i = messageBreakIndex(rest); i >= 0; i = messageBreakIndex(rest)) {
+    messages.push(rest.slice(0, i));
+    rest = rest.slice(i + 2);
+  }
+  messages.push(rest);
+  return messages.filter(m => m.trim());
+}

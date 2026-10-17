@@ -1,4 +1,5 @@
 import { systemOne } from './replyDecision';
+import { splitIntoMessages } from '../utils/common';
 
 /**
  * Qwen sometimes ends a reply by saying it is about to do something ("Going in now! 🚀") without making the tool call,
@@ -13,13 +14,13 @@ export const UNFINISHED_THRESHOLD = 0.3;
 export const UNFINISHED_NUDGE = "Your last message seems to say you're about to do something, but you didn't call a tool, so nothing happened. If you said you'd do it now, do it now by calling the tool. If your message ended with a question or an offer (e.g. \"Want me to...?\"), the user hasn't agreed yet: call `end_message` and wait for their answer, never treat this reminder as their permission. If it's already done, also call `end_message`. Don't apologise or repeat yourself.";
 
 /**
- * The part of a reply the check looks at: its last message (after the last blank line). Judging the whole reply let
+ * The part of a reply the check looks at: its last WhatsApp message (after the last blank line outside a code block). Judging the whole reply let
  * earlier parts outweigh the ending: a 10 message reply ending with "Want me to fire one more dry run...?" scored 0.77
  * "about to act" as a whole and 0.02 on its own, and the nudge made Sofia do the dry run without being asked.
  */
 export function replyEnding(text: string): string {
-  const parts = text.trim().split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
-  return parts[parts.length - 1] ?? '';
+  const messages = splitIntoMessages(text);
+  return messages[messages.length - 1]?.trim() ?? '';
 }
 
 const QUESTIONS = {

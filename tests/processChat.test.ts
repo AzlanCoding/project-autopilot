@@ -4,6 +4,7 @@ import pino from 'pino';
 import { z } from 'zod';
 import AI from '../src/services/ai';
 import { replyEnding, UNFINISHED_NUDGE } from '../src/services/unfinishedReply';
+import { messageBreakIndex, splitIntoMessages } from '../src/utils/common';
 
 /** Builds an AI instance with a fake Responses API that streams `turns` (one list of output items per request). */
 function fakeAI(turns: any[][], extraTools: any[] = []) {
@@ -22,7 +23,10 @@ function fakeAI(turns: any[][], extraTools: any[] = []) {
           return (async function* () {
             for (const item of items) {
               if (item.type == 'message') {
-                yield { type: 'response.output_text.delta', delta: item.content[0].text };
+                // `chunks` streams the text in pieces, like the real API
+                for (const delta of item.chunks ?? [item.content[0].text]) {
+                  yield { type: 'response.output_text.delta', delta };
+                }
               }
               yield { type: 'response.output_item.done', item };
             }
@@ -194,4 +198,26 @@ test('the unfinished check only looks at the last message of a reply', () => {
     'Want me to fire one more dry run at the Testing Group Chat?');
   assert.equal(replyEnding("Here's what I'm sending\n\n  \n\nGoing in now! 🚀"), 'Going in now! 🚀');
   assert.equal(replyEnding('Single message'), 'Single message');
+});
+
+const PROMPT_REPLY = "Here's your prompt rewritten 👇\n\n```\nSend the daily 7am message.\n\nStructure it like this:\n\n1. Greeting\n2. 📚 For everyone\n```\n\nWant me to do a dry run?";
+
+test('a code block with blank lines is sent as one message, even when it streams in small pieces', async () => {
+  const chunks = PROMPT_REPLY.match(/[\s\S]{1,5}/gu)!; // 5 characters at a time
+  const { ai } = fakeAI([[{ ...message(PROMPT_REPLY), chunks }]]);
+  assert.deepEqual(await run(ai), [
+    "Here's your prompt rewritten 👇",
+    '```\nSend the daily 7am message.\n\nStructure it like this:\n\n1. Greeting\n2. 📚 For everyone\n```',
+    'Want me to do a dry run?',
+  ]);
+});
+
+test('message breaks skip code blocks, one line monospace and empty messages', () => {
+  assert.equal(messageBreakIndex('a\n\nb'), 1);
+  assert.equal(messageBreakIndex('```\na\n\nb'), -1); // Still inside the block
+  assert.equal(messageBreakIndex('use ```x``` here\n\nnext'), 16); // ```x``` opens and closes on one line
+  assert.deepEqual(splitIntoMessages('one\n\n\n\ntwo\n\n   \n\n```\nx\n\ny\n```'), ['one', 'two', '```\nx\n\ny\n```']);
+  assert.deepEqual(splitIntoMessages('before\n\n```\nnever closed\n\nstill in it'), ['before', '```\nnever closed\n\nstill in it']);
+  // The unfinished check judges the last message as sent, not the last paragraph inside a code block
+  assert.equal(replyEnding("Here it is:\n\n```\nline 1\n\nline 2\n```"), '```\nline 1\n\nline 2\n```');
 });
