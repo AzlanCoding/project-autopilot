@@ -42,8 +42,11 @@ export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
  * Chat platform operations needed by the chat tools. Implemented by SofiaBot (WhatsApp) and by the CLI test harness.
  */
 export interface ChatAdapter {
-  /** Send a message to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
-  sendMessage(id: string, text: string): Promise<void>;
+  /**
+   * Send a message to a user id, group id (ending with `@g.us`) or WhatsApp jid. `label` marks it as sent by the AI
+   * (quoting an "I am an AI Agent" message), only the first message of a send is labelled.
+   */
+  sendMessage(id: string, text: string, label?: boolean): Promise<void>;
   /** Send a sticker or GIF to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
   sendStickerGif(id: string, sticker: Sticker): Promise<void>;
   /** Download an image, sticker, GIF or video by the media id shown in the chat history. */
@@ -787,8 +790,9 @@ ${await message()}`,
       }),
       func: async (args) => {
         const { id, messages } = args as any;
-        for (const text of messages) {
-          await adapter.sendMessage(id, text);
+        for (let i = 0; i < messages.length; i++) {
+          // Only the first message is labelled as from the AI, like Sofia's normal replies
+          await adapter.sendMessage(id, messages[i], i == 0);
         }
         return `${messages.length} message${messages.length == 1 ? '' : 's'} sent`;
       }

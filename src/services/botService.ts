@@ -738,7 +738,7 @@ export class SofiaBot implements ChatAdapter {
     }
   }
 
-  public async sendMessage(id: string, text: string): Promise<void> {
+  public async sendMessage(id: string, text: string, label = true): Promise<void> {
     if (!this.sock) {
       throw Error("Bot is not connected.");
     }
@@ -757,7 +757,7 @@ export class SofiaBot implements ChatAdapter {
       pushName: 'Sofia',
       broadcast: false,
     };
-    await this.sock.sendMessage(jid, { text }, { quoted: replyMsg });
+    await this.sock.sendMessage(jid, { text }, label ? { quoted: replyMsg } : {});
   }
 
   public async listGroups(): Promise<{ id: string, name: string }[]> {
