@@ -13,7 +13,9 @@ import 'dotenv/config';
 import fs from 'fs';
 import readline from 'readline';
 import pino from 'pino';
-import AI, { ChatAdapter } from './src/services/ai';
+import AI, { ChatAdapter, ChatMedia } from './src/services/ai';
+import type { Sticker } from './src/models/Sticker';
+import { chatContext } from './src/services/chatContext';
 import Store from './src/services/store';
 import type { PreProccessChatMsg } from './src/services/botService';
 import { EasyInputMessage, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses.js';
@@ -50,6 +52,16 @@ class MockChatAdapter implements ChatAdapter {
     const name = id.endsWith('@g.us') ? this.groups.find(g => g.id == id)?.name : (await this.db.user.findById(id))?.name;
     console.log(`\n📤 [send_message -> ${name} (${id})]\n${text}\n`);
     await this.record(id, 'AI', text);
+  }
+
+  async sendStickerGif(id: string, sticker: Sticker) {
+    const name = id.endsWith('@g.us') ? this.groups.find(g => g.id == id)?.name : (await this.db.user.findById(id))?.name ?? id;
+    console.log(`\n📤 [${sticker.kind} -> ${name} (${id})] ${sticker.id}: ${sticker.description}\n`);
+    await this.record(id, 'AI', `<WhatsApp ${sticker.kind == 'gif' ? 'GIF' : 'Sticker'}>`);
+  }
+
+  async getMedia(mediaId: string): Promise<ChatMedia> {
+    throw Error(`Media is not available in the CLI test harness (media_id ${mediaId}).`);
   }
 
   async listGroups() {
@@ -141,19 +153,22 @@ const main = async () => {
       chatHistory.push({ role: 'user', content: `${user.name} (${user.id}):\n${input}\nTime:${formatDateTime(new Date())}`, type: 'message' } as EasyInputMessage);
       let reply = '';
       try {
-        for await (const state of ai.processChatv3(chatHistory)) {
-          if (state.type == 'chunk_display') {
-            reply += (reply ? '\n\n' : '') + state.content;
+        // The current chat is the user's, so send_sticker_gif sends to them
+        await chatContext.run({ chatId: user.id }, async () => {
+          for await (const state of ai.processChatv3(chatHistory)) {
+            if (state.type == 'chunk_display') {
+              reply += (reply ? '\n\n' : '') + state.content;
+            }
+            else if (state.type == 'tool_call') {
+              const data = (state as any).data as ResponseFunctionToolCall;
+              console.log(`🔧 ${data.name}(${data.arguments})`);
+            }
+            else if (state.type == 'tool_call_output') {
+              const output = String((state as any).data.output);
+              console.log(`   ↳ ${output.length > 600 ? output.slice(0, 600) + '...' : output}`);
+            }
           }
-          else if (state.type == 'tool_call') {
-            const data = (state as any).data as ResponseFunctionToolCall;
-            console.log(`🔧 ${data.name}(${data.arguments})`);
-          }
-          else if (state.type == 'tool_call_output') {
-            const output = String((state as any).data.output);
-            console.log(`   ↳ ${output.length > 600 ? output.slice(0, 600) + '...' : output}`);
-          }
-        }
+        });
       }
       catch (e) {
         console.error('Chat failed:', e);

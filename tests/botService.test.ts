@@ -8,7 +8,7 @@ import { UserService } from '../src/services/userService';
 function setup() {
   const users = Object.create(UserService.prototype) as UserService;
   Object.assign(users, {
-    store: { toolCallHist: { followTrail: async () => [] } },
+    store: { toolCallHist: { trailsFor: async () => new Map() } },
     generateUserStringFromJid: async (jid: string) => jid,
     promptChangelogPath: 'does-not-exist.json',
   });

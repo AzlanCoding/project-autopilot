@@ -77,37 +77,101 @@ export function convertHoursToReadableTime(totalHours: number) {
   return parts.length > 0 ? parts.join(', ') : '0 hours';
 }
 
-export function WK_Number_to_timeframe(week_num: number): string {
-  if (week_num <= 0) {
-    return "Invalid Week Number"
-  }
-  return `Week ${week_num} starts from ${moment('2026-04-20').add(week_num - 1, 'weeks').format('DD/MM/YYYY, ddd')} to ${moment('2026-04-26').add(week_num - 1, 'weeks').format('DD/MM/YYYY, ddd')}.` + (
-    week_num >= 18 ? " This week is also part of a semester break." :
-      week_num == 9 || week_num == 10 ? " This week is also part of a term break." : ""
-  )
+export interface Semester {
+  name: string,
+  /** Monday of Week 1. Weeks are Monday-to-Sunday. */
+  week1: string,
+  /** The academic calendar by week number, the last period's end is the end of the semester. */
+  periods: { name: string, from: number, to: number }[],
 }
 
-/**
- * Given an ISO date string (YYYY-MM-DD), returns the corresponding week number
- * relative to the reference start date used in {@link WK_Number_to_timeframe}.
- * The reference start date is 2026-04-20, which represents Week 1. Weeks are
- * considered Monday‑to‑Sunday intervals. Written by GPT-oss 20B
- *
- * @param isoDate - ISO formatted date string (YYYY-MM-DD)
- * @returns week number as a positive integer; returns 0 if the date is before the reference start date.
- */
-export function getWeekNumberFromDate(isoDate: string): number {
-  const target = moment(isoDate, 'YYYY-MM-DD', true);
+/** The academic calendar, oldest first. Add the next semester here. */
+export const SEMESTERS: Semester[] = [
+  {
+    name: 'Semester 1', week1: '2026-04-20', periods: [
+      { name: 'Instruction', from: 1, to: 8 },
+      { name: 'Mid-Sem Break', from: 9, to: 10 },
+      { name: 'Instruction', from: 11, to: 17 },
+      { name: 'Study/Exam', from: 18, to: 20 },
+      { name: 'Vacation', from: 21, to: 26 },
+    ]
+  },
+  {
+    name: 'Semester 2', week1: '2026-10-19', periods: [
+      { name: 'Instruction', from: 1, to: 9 },
+      { name: 'Mid-Sem Break', from: 10, to: 11 },
+      { name: 'Instruction', from: 12, to: 17 },
+      { name: 'Study/Exam', from: 18, to: 20 },
+      { name: 'Vacation', from: 21, to: 26 },
+    ]
+  },
+];
+
+const DATE_FORMAT = 'DD/MM/YYYY, ddd';
+const weekStart = (sem: Semester, week: number) => moment(sem.week1).add(week - 1, 'weeks');
+const lastWeek = (sem: Semester) => sem.periods[sem.periods.length - 1].to;
+const periodOf = (sem: Semester, week: number) => sem.periods.find(p => week >= p.from && week <= p.to);
+
+/** The semester and week number a date (YYYY-MM-DD, or a moment) falls in, or null if it is outside every semester. */
+export function semesterWeekOf(date: string | moment.Moment): { semester: Semester, week: number } | null {
+  const target = typeof date == 'string' ? moment(date, 'YYYY-MM-DD', true) : date.clone().startOf('day');
   if (!target.isValid()) {
     throw new Error('Invalid ISO date format. Expected YYYY-MM-DD');
   }
-
-  // Reference start of Week 1
-  const referenceStart = moment('2026-04-20');
-  const diffDays = target.diff(referenceStart, 'days');
-  if (diffDays < 0) {
-    return 0;
+  for (const semester of SEMESTERS) {
+    const week = Math.floor(target.diff(moment(semester.week1), 'days') / 7) + 1;
+    if (week >= 1 && week <= lastWeek(semester)) {
+      return { semester, week };
+    }
   }
-  // Math.floor handles positive integers correctly
-  return Math.floor(diffDays / 7) + 1;
+  return null;
+}
+
+/**
+ * The semester week numbers refer to by default: the one today is in, or during its Vacation, the next one (people
+ * talking about "Week 3" during the break mean the coming semester).
+ */
+export function defaultSemester(today = moment()): Semester {
+  const current = semesterWeekOf(today);
+  if (!current) {
+    return SEMESTERS.find(s => moment(s.week1).isAfter(today)) ?? SEMESTERS[SEMESTERS.length - 1];
+  }
+  const next = SEMESTERS[SEMESTERS.indexOf(current.semester) + 1];
+  return periodOf(current.semester, current.week)?.name == 'Vacation' && next ? next : current.semester;
+}
+
+/** Describes a week: its dates and which part of the academic calendar it is in. */
+export function WK_Number_to_timeframe(week_num: number, semester: Semester = defaultSemester()): string {
+  if (!Number.isInteger(week_num) || week_num < 1 || week_num > lastWeek(semester)) {
+    return `${semester.name} only has Weeks 1 to ${lastWeek(semester)} (${weekStart(semester, 1).format(DATE_FORMAT)} to ${weekStart(semester, lastWeek(semester)).add(6, 'days').format(DATE_FORMAT)}).`;
+  }
+  const period = periodOf(semester, week_num)!;
+  return `${semester.name}, Week ${week_num} is from ${weekStart(semester, week_num).format(DATE_FORMAT)} to ${weekStart(semester, week_num).add(6, 'days').format(DATE_FORMAT)}. ` +
+    `It is part of ${period.name} (Weeks ${period.from}-${period.to}, ${weekStart(semester, period.from).format(DATE_FORMAT)} to ${weekStart(semester, period.to).add(6, 'days').format(DATE_FORMAT)}).`;
+}
+
+/** Describes the semester week a date (YYYY-MM-DD) falls in. */
+export function describeDateWeek(isoDate: string): string {
+  const found = semesterWeekOf(isoDate);
+  if (!found) {
+    const first = SEMESTERS[0], last = SEMESTERS[SEMESTERS.length - 1];
+    return `${isoDate} is outside the academic calendar I know (${first.name} starts ${weekStart(first, 1).format(DATE_FORMAT)}, ${last.name} ends ${weekStart(last, lastWeek(last)).add(6, 'days').format(DATE_FORMAT)}).`;
+  }
+  return `${isoDate} is in ${WK_Number_to_timeframe(found.week, found.semester)}`;
+}
+/**
+ * Converts a WhatsApp message timestamp (seconds) to a number. Baileys gives a number or a Long `{ low, high }`, and the
+ * message store saves them as text, so they also come back as a numeric string or a Long as JSON text. Anything that
+ * isn't a number breaks sorting messages by time, which jumbles the whole chat history.
+ */
+export function toUnixSeconds(ts: unknown): number {
+  if (typeof ts == 'string') {
+    ts = ts.trim().startsWith('{') ? JSON.parse(ts) : Number(ts);
+  }
+  if (ts && typeof ts == 'object' && 'low' in ts) {
+    const { low, high } = ts as { low: number, high?: number };
+    return (high ?? 0) * 2 ** 32 + (low >>> 0);
+  }
+  const n = Number(ts);
+  return isNaN(n) ? 0 : n;
 }

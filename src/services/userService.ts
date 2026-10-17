@@ -69,10 +69,18 @@ export class UserService {
     // messages = (await Promise.all(messages.filter((m: PreProccessChatMsg) => m.time > dateLimit).map(async (m: PreProccessChatMsg) => ({ ...m, user: m.user ? (m.user == 'AI' ? m.user : await this.generateUserStringFromJid(m.user)) : "Unknown User" })))) as PreProccessChatMsg[];
     messages = (await Promise.all(messages.map(async (m: PreProccessChatMsg) => ({ ...m, user: m.user ? (m.user == 'AI' ? m.user : await this.generateUserStringFromJid(m.user)) : "Unknown User" })))) as PreProccessChatMsg[];
 
-    // TODO: Make Paralell
+    // Tool calls Sofia made after each message are replayed after it. Old reasoning is left out (it is only useful within
+    // the reply it came from), and tool results are stamped with when they ran so they aren't mistaken for fresh results.
+    // Rows saved before `created_at` existed use the time of the message the tool call followed.
+    const trails = await this.store.toolCallHist.trailsFor(messages.map(m => m.id).filter((id): id is string => !!id));
     let newMessages: Array<ResponseInputItem | PreProccessChatMsg> = [];
     for (let i = 0; i < messages.length; i++) {
-      newMessages.push(messages[i], ...(messages[i].id ? await this.store.toolCallHist.followTrail(messages[i].id as string) : []));
+      const trail = (messages[i].id && trails.get(messages[i].id as string)) || [];
+      newMessages.push(messages[i], ...trail
+        .filter(({ data }) => data.type != 'reasoning')
+        .map(({ data, createdAt }): ResponseInputItem => data.type == 'function_call_output'
+          ? { ...data, output: `[Result from ${createdAt ? formatDateTime(createdAt) : `around ${formatDateTime(messages[i].time * 1000)}`}, it may be out of date now] ${data.output}` }
+          : data));
     }
 
     const results: ResponseInputItem[] = [];
@@ -87,8 +95,9 @@ export class UserService {
       const note = { role: 'system', content: promptChangeNote(promptChanges.shift()!, formatDateTime), type: 'message' } as EasyInputMessage;
       notes.add(note);
       results.push(note);
-      limit++;
     };
+    /** Index in `results` of each (merged) chat message, used to keep the last `limit` messages with their tool calls. */
+    const blockStarts: number[] = [];
 
     let lastMsgId;
 
@@ -96,7 +105,6 @@ export class UserService {
       let currentMessage = newMessages[i];
       if (!(currentMessage as any).user) {
         results.push(currentMessage as ResponseInputItem);
-        limit++;
         i++;
         continue;
       }
@@ -151,6 +159,7 @@ export class UserService {
 
       // Final assembly for the block
       let finalBlock = outputParts.join('\n\n');
+      blockStarts.push(results.length);
       results.push((finalBlock.startsWith('AI:\n') ? { role: 'assistant', content: finalBlock.slice(4), type: 'message' } : { role: 'user', content: finalBlock, type: 'message' }) as EasyInputMessage);
 
       // Move index to the next unprocessed message
@@ -161,7 +170,8 @@ export class UserService {
       pushPromptChange();
     }
 
-    const window = results.slice(limit * -1);
+    // The last `limit` messages, with the tool calls and prompt change notes after them
+    const window = results.slice(blockStarts.length > limit ? blockStarts[blockStarts.length - limit] : 0);
     // A note at the start of the window has no older messages before it to explain
     while (window.length && notes.has(window[0])) {
       window.shift();

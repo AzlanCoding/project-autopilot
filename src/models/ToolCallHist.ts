@@ -16,6 +16,8 @@ export class ToolCallHist extends Model<
   declare aftId: string;
   declare whatsapp_chat: string;
   declare data: any;
+  /** When the tool call/output was saved. Null for rows saved before this column was added. */
+  declare created_at: CreationOptional<Date>;
 
 
   static register(sequelize: Sequelize): ModelStatic<ToolCallHist> {
@@ -40,6 +42,12 @@ export class ToolCallHist extends Model<
           type: DataTypes.JSON,
           allowNull: false,
           unique: false
+        },
+        // Nullable without a database default, so `sync({ alter: true })` adds it without touching existing rows
+        // (a DEFAULT now() would stamp every old row with the time of the migration). Set in ToolCallHistService.create.
+        created_at: {
+          type: DataTypes.DATE,
+          allowNull: true,
         }
       },
       {

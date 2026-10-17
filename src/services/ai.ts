@@ -15,17 +15,19 @@ import { z } from "zod";
 import { OpenAI } from "openai";
 // import { ChatOllama } from '@langchain/ollama'
 import Store from './store';
-import { formatDateTime, getTime, getWeekNumberFromDate, parseTimestamp, WK_Number_to_timeframe } from '../utils/common';
+import { describeDateWeek, formatDateTime, getTime, parseTimestamp, SEMESTERS, WK_Number_to_timeframe } from '../utils/common';
 import { User } from '../models/User';
 import { ScheduledTask } from '../models/ScheduledTask';
 import type { PreProccessChatMsg } from './botService';
+import type { Sticker } from '../models/Sticker';
+import { ModelImage, toModelImage } from '../utils/media';
+import { chatContext } from './chatContext';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
-import { MODELSTUDIO_BASE_URL } from '../config/modelStudio';
+import { CHAT_MODEL, MODELSTUDIO_BASE_URL } from '../config/modelStudio';
 
-// Alibaba Model Studio model used for chats and scheduled tasks
-export const CHAT_MODEL = process.env.CHAT_MODEL || 'qwen3.8-flash';
+export { CHAT_MODEL };
 
 export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
   usage_str: string
@@ -39,12 +41,33 @@ export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
  * Chat platform operations needed by the chat tools. Implemented by SofiaBot (WhatsApp) and by the CLI test harness.
  */
 export interface ChatAdapter {
-  /** Send a message to a user id or group id (ending with `@g.us`). */
+  /** Send a message to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
   sendMessage(id: string, text: string): Promise<void>;
+  /** Send a sticker or GIF to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
+  sendStickerGif(id: string, sticker: Sticker): Promise<void>;
+  /** Download an image, sticker, GIF or video by the media id shown in the chat history. */
+  getMedia(mediaId: string): Promise<ChatMedia>;
   listGroups(): Promise<{ id: string, name: string }[]>;
   /** Load the chat history with a user id or group id, oldest first. */
   loadChatById(id: string): Promise<PreProccessChatMsg[]>;
 }
+
+export interface ChatMedia {
+  buffer: Buffer,
+  mime: string,
+  kind: 'image' | 'sticker' | 'gif' | 'video',
+}
+
+/** Returned by tools that show the model an image (`view_media`), the image is added after the tool output. */
+export interface ToolImageResult {
+  text: string,
+  image: ModelImage,
+}
+
+const isToolImageResult = (r: any): r is ToolImageResult => !!r && typeof r == 'object' && typeof r.text == 'string' && !!r.image?.dataUrl;
+
+/** Tools that end Sofia's reply: `end_message`, and send tools called with `end_message: true`. */
+const endsReply = (name: string, args: any) => name == 'end_message' || args?.end_message === true;
 
 export interface ScheduledTaskRunOptions {
   /** Whether the model must send a message with send_message. Defaults to true. */
@@ -99,10 +122,13 @@ export default class AI {
 
   // Sticker & GIFs Tools
   stickerGifTool: ExtendedDynamicStructuredTool;
-  sendStickerGifTool: ExtendedDynamicStructuredTool;
+  endMessageTool: ExtendedDynamicStructuredTool;
 
   // Chat platform specific tools will be added later on runtime by registerChatTools()
   sendMessageTool?: ExtendedDynamicStructuredTool;
+  sendStickerGifTool?: ExtendedDynamicStructuredTool;
+  sendStickerGifToChatTool?: ExtendedDynamicStructuredTool;
+  viewMediaTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
   chatAdapter?: ChatAdapter;
@@ -445,25 +471,28 @@ export default class AI {
 
     this.stickerGifTool = new ExtendedDynamicStructuredTool({
       name: "search_sticker_gif",
-      description: "Search for a Sticker OR GIF",
+      description: "Search your sticker and GIF collection. Describe the reaction or emotion you want to send (e.g. \"excited celebration\", \"sleepy good night\", \"laughing hard\"). Returns the best matches with their ids and descriptions, then send one with `send_sticker_gif`.",
       schema: z.object({
-        query: z.string().describe("The query to search for. Can be a keyword or a phrase."),
+        query: z.string().min(1).describe("[Required] The reaction, emotion or content you are looking for."),
+        type: z.enum(['sticker', 'gif', 'any']).optional().describe("Only search stickers or GIFs. Defaults to any."),
+        limit: z.number().int().min(1).max(10).optional().describe("Number of results. Defaults to 5."),
       }),
       func: async (args) => {
-        throw Error("Hi Sofia. This is a built-in message from Azlan. Sorry but I'm not done writing the code for this tool yet. Please try again some other time.");
+        const { query, type = 'any', limit = 5 } = args as any;
+        const results = await this.db.stickers.search(query, type == 'any' ? undefined : type, limit);
+        if (!results.length) {
+          return "No stickers or GIFs found. Reply with text instead.";
+        }
+        return JSON.stringify(results.map(s => ({ id: s.id, type: s.kind, animated: s.animated, description: s.description })));
       }
-    }, "{}")
+    }, "{query: string, type?: 'sticker' | 'gif' | 'any', limit?: number}");
 
-    this.sendStickerGifTool = new ExtendedDynamicStructuredTool({
-      name: "send_sticker_gif",
-      description: "Send a Sticker OR a GIF to the current chat",
-      schema: z.object({
-        id: z.string().describe("The ID of the sticker.")
-      }),
-      func: async (args) => {
-        throw Error("Hi Sofia. This is a built-in message from Azlan. Sorry but I'm not done writing the code for this tool yet. Please try again some other time.");
-      }
-    }, "{}")
+    this.endMessageTool = new ExtendedDynamicStructuredTool({
+      name: "end_message",
+      description: "End your reply now, so you don't send any more text after this. Use it after you've said everything, e.g. after sending a sticker or GIF as your whole reply.",
+      schema: z.object({}),
+      func: async () => "Reply ended.",
+    }, "{}");
 
     this.timetableTool = new ExtendedDynamicStructuredTool({
       name: "get_timetable",
@@ -479,28 +508,36 @@ export default class AI {
 
 
     // Week Tools
+    const semesterNames = SEMESTERS.map(sem => `${sem.name} (Week 1 starts ${sem.week1.split('-').reverse().join('/')})`).join(', ');
     this.weekNumToDateTool = new ExtendedDynamicStructuredTool({
       name: "week_number_to_date_range",
-      description: "Translates a Week Number into a range of dates",
+      description: `Translates a semester's week number into its dates (Monday to Sunday) and says which part of the academic calendar it is in (Instruction, Mid-Sem Break, Study/Exam or Vacation). Semesters: ${semesterNames}. Week numbers restart every semester.`,
       schema: z.object({
-        week_num: z.number().describe("The week number.")
+        week_num: z.number().describe("[Required] The week number."),
+        semester: z.number().int().optional().describe("The semester number, e.g. 2 for Semester 2. Defaults to the current semester, or the next one if the current semester is in its Vacation weeks."),
       }),
       func: async (args) => {
-        const { week_num } = args as any;
-        return WK_Number_to_timeframe(week_num);
+        const { week_num, semester } = args as any;
+        if (semester === undefined) {
+          return WK_Number_to_timeframe(week_num);
+        }
+        const found = SEMESTERS.find(sem => sem.name == `Semester ${semester}`);
+        if (!found) {
+          throw Error(`Unknown semester ${semester}. Known semesters: ${semesterNames}.`);
+        }
+        return WK_Number_to_timeframe(week_num, found);
       }
-    }, "{week_num: number}");
+    }, "{week_num: number, semester?: number}");
 
     this.dateToWeekNumTool = new ExtendedDynamicStructuredTool({
       name: "date_to_week_num_tool",
-      description: "Gets the week number from a given date",
+      description: "Gets the semester and week number a date falls in, with that week's dates and which part of the academic calendar it is in.",
       schema: z.object({
         date: z.string().describe("The date as ISO 8601, e.g, 2007-12-27")
       }),
       func: async (args) => {
         const { date } = args as any;
-        const weekNum = getWeekNumberFromDate(date);
-        return `${date} is in Week ${weekNum}. ${WK_Number_to_timeframe(weekNum)}`
+        return describeDateWeek(date);
       }
     }, "{date: string}")
 
@@ -513,7 +550,8 @@ export default class AI {
       ...(t.recurring ? { cronPattern: t.cronPattern } : { runAt: formatDateTime(Number(t.runAt)) }),
       contextChatId: t.contextChatId,
       createdAt: formatDateTime(Number(t.createdAt)),
-      lastRunAt: t.lastRunAt ? formatDateTime(Number(t.lastRunAt)) : null,
+      // One-time tasks are deleted when they run, so they never have a lastRunAt
+      ...(t.recurring ? { lastRunAt: t.lastRunAt ? formatDateTime(Number(t.lastRunAt)) : null } : {}),
       nextRun: (() => { const n = this.db.scheduledTask.nextRun(t.id); return n ? formatDateTime(n) : null; })(),
     });
     const validateChatId = async (id?: string) => {
@@ -564,7 +602,7 @@ export default class AI {
 
     this.listScheduledTasksTool = new ExtendedDynamicStructuredTool({
       name: "list_scheduled_tasks",
-      description: "List all tasks you have scheduled for yourself.",
+      description: "List all tasks you have scheduled for yourself, as they are right now. Return Schema: `runAt` is when a one-time task will run. `cronPattern` is a recurring task's schedule. `nextRun` is the next time the task will run. `lastRunAt` (recurring tasks only) is the last time it ran, null if it hasn't run yet. One-time tasks are deleted as soon as they run, so a one-time task that already ran is no longer listed. That is normal, not a bug. Only trust a fresh call to this tool, not task lists from earlier in the chat.",
       schema: z.object({}),
       func: async () => {
         return JSON.stringify((await this.db.scheduledTask.findAll()).map(formatTask));
@@ -626,7 +664,7 @@ export default class AI {
       this.assignmentCreateTool/*, this.assignmentGetTool*/, this.assignmentListTool, this.assignmentUpdateTool, this.assignmentDeleteTool,
       this.assessmentCreateTool/*, this.assessmentGetTool*/, this.assessmentListTool, this.assessmentUpdateTool, this.assessmentDeleteTool,
       this.userListTool,
-      this.stickerGifTool, this.sendStickerGifTool,
+      this.stickerGifTool, this.endMessageTool,
       this.timetableTool,
       this.weekNumToDateTool, this.dateToWeekNumTool,
       this.scheduleTaskTool, this.listScheduledTasksTool, this.editScheduledTaskTool, this.cancelScheduledTaskTool
@@ -739,17 +777,79 @@ ${await message()}`,
     this.chatAdapter = adapter;
     this.sendMessageTool = new ExtendedDynamicStructuredTool({
       name: "send_message",
-      description: "Send a message to a chat or a group chat based on a user id or group id (ending with `@g.us`).",
+      description: "Send messages to a chat or a group chat based on a user id or group id (ending with `@g.us`). Each item in `messages` is sent as a separate WhatsApp message, in order, like your bite sized replies.",
       schema: z.object({
         id: z.string().describe("[Required] The user id or group id to send the chat to. E.g,`467793d9-6b60-45e7-9fbc-a202ef40837f` or `12345678@g.us`"),
-        text: z.string().min(1).describe("The message to send."),
+        messages: z.array(z.string().min(1)).min(1).describe("[Required] The messages to send, each one is a separate WhatsApp message."),
       }),
       func: async (args) => {
-        const { id, text } = args as any;
-        await adapter.sendMessage(id, text);
-        return "Message Sent";
+        const { id, messages } = args as any;
+        for (const text of messages) {
+          await adapter.sendMessage(id, text);
+        }
+        return `${messages.length} message${messages.length == 1 ? '' : 's'} sent`;
       }
-    }, "{id: string, text: string}");
+    }, "{id: string, messages: string[]}");
+
+    const findSticker = async (stickerId: string) => {
+      const sticker = await this.db.stickers.findById(stickerId);
+      if (!sticker || sticker.status != 'approved') {
+        throw Error(`Unknown sticker or GIF id "${stickerId}". Get ids from \`search_sticker_gif\`.`);
+      }
+      return sticker;
+    };
+    const endMessageField = z.boolean().describe("[Required] true to end your reply after this (you won't send any more text), e.g. when the sticker/GIF is your whole reply. false to keep replying after it.");
+
+    this.sendStickerGifTool = new ExtendedDynamicStructuredTool({
+      name: "send_sticker_gif",
+      description: "Send a sticker or GIF (by id from `search_sticker_gif`) to the chat you are replying in.",
+      schema: z.object({
+        sticker_id: z.string().describe("[Required] The sticker or GIF id, e.g. `stk_1a2b3c4d`."),
+        end_message: endMessageField,
+      }),
+      func: async (args) => {
+        const { sticker_id } = args as any;
+        const chat = chatContext.getStore();
+        if (!chat) {
+          throw Error("You are not replying in a chat right now, use `send_sticker_gif_to_chat` instead.");
+        }
+        await adapter.sendStickerGif(chat.chatId, await findSticker(sticker_id));
+        return "Sent";
+      }
+    }, "{sticker_id: string, end_message: boolean}");
+
+    this.sendStickerGifToChatTool = new ExtendedDynamicStructuredTool({
+      name: "send_sticker_gif_to_chat",
+      description: "Send a sticker or GIF (by id from `search_sticker_gif`) to another chat or group chat by user id or group id (ending with `@g.us`).",
+      schema: z.object({
+        id: z.string().describe("[Required] The user id or group id to send it to."),
+        sticker_id: z.string().describe("[Required] The sticker or GIF id, e.g. `stk_1a2b3c4d`."),
+        end_message: endMessageField,
+      }),
+      func: async (args) => {
+        const { id, sticker_id } = args as any;
+        await adapter.sendStickerGif(id, await findSticker(sticker_id));
+        return "Sent";
+      }
+    }, "{id: string, sticker_id: string, end_message: boolean}");
+
+    this.viewMediaTool = new ExtendedDynamicStructuredTool({
+      name: "view_media",
+      description: "Download and view an image, sticker, GIF or video from the chat history by its `media_id` (shown like `<WhatsApp Image media_id=...>`). For GIFs, animated stickers and videos you only see the first frame.",
+      schema: z.object({
+        media_id: z.string().describe("[Required] The media_id from the chat history."),
+      }),
+      func: async (args): Promise<ToolImageResult> => {
+        const { media_id } = args as any;
+        const media = await adapter.getMedia(media_id);
+        const image = await toModelImage(media.buffer, media.mime);
+        const label = { image: 'Image', sticker: 'Sticker', gif: 'GIF', video: 'Video' }[media.kind];
+        return {
+          text: `${label} ${media_id} is attached in the next message${image.animated ? `. It is ${media.kind == 'video' ? 'a video' : 'animated (moving)'}, you can only see its first frame` : ''}.`,
+          image,
+        };
+      }
+    }, "{media_id: string}");
 
     this.listGroupsTool = new ExtendedDynamicStructuredTool({
       name: 'list_groups',
@@ -792,7 +892,7 @@ ${await message()}`,
       }
     }, "{id: string, limit?: number}");
 
-    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool);
+    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool, this.sendStickerGifTool, this.sendStickerGifToChatTool, this.viewMediaTool);
     this.bindModel();
   }
 
@@ -1273,6 +1373,8 @@ ${await message()}`,
 
       // Small buffer for chunked yields
       let buffer = "";
+      // Set when a tool ends the reply (`end_message`, or a send tool with `end_message: true`)
+      let ended = false;
 
       // // Helper to flush buffer as chunk_display
       // const flushBuffer = (delimiter: boolean) => {
@@ -1301,6 +1403,8 @@ ${await message()}`,
         data: ResponseInputItem.FunctionCallOutput
       }> {
         let hasToolCalls = false;
+        // Images from tools (`view_media`), added after this turn's tool outputs
+        const images: EasyInputMessage[] = [];
         instance.logger.info(chatHistory, "CHAT HISTORY CREATED");
         // Start streaming from the Responses API
         // The official client exposes a streaming helper `client.responses.stream`.
@@ -1363,6 +1467,7 @@ ${await message()}`,
               instance.logger.info(`Called ${event.item.name}`)
               const tool = toolMap[event.item.name];
               let result: string;
+              let failed = false;
               try {
                 if (!tool) {
                   result = `Error: Unknown tool "${event.item.name}"`;
@@ -1378,16 +1483,27 @@ ${await message()}`,
                   }
 
                   // parse args safely (if present)
-                  const args2 = JSON.parse(event.item.arguments) ?? {};
+                  const args2 = JSON.parse(event.item.arguments || '{}') ?? {};
                   console.trace(args2)
-                  result = await tool.invoke(args2);
+                  const raw = await tool.invoke(args2);
+                  if (isToolImageResult(raw)) {
+                    result = raw.text;
+                    images.push({ role: 'user', content: [{ type: 'input_text', text: `[${event.item.name} result for ${event.item.arguments}]` }, { type: 'input_image', image_url: raw.image.dataUrl, detail: 'auto' }], type: 'message' });
+                  }
+                  else {
+                    result = typeof raw == 'string' ? raw : JSON.stringify(raw);
+                  }
+                  if (endsReply(event.item.name, args2)) {
+                    ended = true;
+                  }
 
                 }
 
               }
               catch (err: any) {
                 console.error(err);
-                result = `Tool execution error:${err.message}\nToolArgs: ${tool.usage_str}`;
+                failed = true;
+                result = `Tool execution error:${err.message}\nToolArgs: ${tool?.usage_str}`;
               }
               console.trace(result);
 
@@ -1431,7 +1547,9 @@ ${await message()}`,
             }
           }
           else if (event.type == "response.output_text.delta") {
-            // 📡 NORMAL STREAMING (unchanged)
+            if (ended) {
+              continue; // The reply was ended by a tool, don't send anything after it
+            }
             const chunkText = (event.delta || "") as string;
             buffer += chunkText;
 
@@ -1448,6 +1566,12 @@ ${await message()}`,
           }
         }
 
+        chatHistory.push(...images);
+        if (ended) {
+          instance.logger.info('Reply ended by a tool call');
+          buffer = "";
+          return;
+        }
         if (hasToolCalls) {
           instance.logger.trace("RECALLING!!!")
           try {
@@ -1525,7 +1649,7 @@ ${await message()}`,
     const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
     User Memories: ${JSON.parse(memories).data.filter((m: any) => m.category != 'core').slice(-10).map((m: any) => m.text).join(';')}
     If you have no memory of saying hi to this user for the first time, please use the \`memory_write\` tool call to save this event (leave category empty) and then introduce yourself to the user.`}
-    Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (GIFs and Stickers unavailable in this mode)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
+    Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (stickers and GIFs you send are simulated, media_id images are unavailable)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.

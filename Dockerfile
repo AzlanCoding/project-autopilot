@@ -13,7 +13,8 @@ RUN pnpm exec tsc -p . && pnpm prune --prod
 # --- Runtime stage ---
 FROM node:24-bookworm-slim
 # Dates are formatted in the server's local time, so pin it to Singapore
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
+# ffmpeg converts GIFs to mp4, reads the first frame of GIFs/videos for the vision model, and makes Baileys' video thumbnails
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ffmpeg && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     TZ=Asia/Singapore
 WORKDIR /app

@@ -18,6 +18,8 @@ import { ToolCallHist } from '../models/ToolCallHist';
 import { ScheduledTaskService } from './scheduledTaskService';
 import { ScheduledTask } from '../models/ScheduledTask';
 import { MODELSTUDIO_BASE_URL } from '../config/modelStudio';
+import { Sticker } from '../models/Sticker';
+import { StickerService } from './stickerService';
 
 const SETTINGS_PATH = './assets/settings.json';
 // Shown to the AI after a memory_write so it can clean up overlapping memories.
@@ -36,6 +38,7 @@ export default class Store {
   toolCallHist: ToolCallHistService;
   scheduledTask: ScheduledTaskService;
   user: UserService;
+  stickers: StickerService;
   private logger: Logger;
 
   ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>, options?: ScheduledTaskRunOptions) => Promise<void>
@@ -59,6 +62,7 @@ export default class Store {
     this.toolCallHist = new ToolCallHistService(this, this.logger);
     this.scheduledTask = new ScheduledTaskService(this, this.logger);
     this.user = new UserService(this);
+    this.stickers = new StickerService(this, this.logger);
   }
 
   async init() {
@@ -70,6 +74,7 @@ export default class Store {
     const UserModel = User.register(this.db);
     const ToolCallHistModel = ToolCallHist.register(this.db);
     const ScheduledTaskModel = ScheduledTask.register(this.db);
+    const StickerModel = Sticker.register(this.db);
 
     // Optionally ensure they are available on sequelize.models with the same keys you expect
     this.db.models.AssignmentStore = AssignmentModel;
@@ -77,6 +82,7 @@ export default class Store {
     this.db.models.UserStore = UserModel;
     this.db.models.ToolCallHistStore = ToolCallHistModel;
     this.db.models.ScheduledTaskStore = ScheduledTaskModel;
+    this.db.models.StickerStore = StickerModel;
 
     // this.assignment = AssignmentModel as any; // Quick Fix
     // this.assessment = AssessmentModel as any; // Quic Fix
@@ -88,6 +94,7 @@ export default class Store {
     await User.sync({ alter: true });
     await ToolCallHistModel.sync({ alter: true });
     await ScheduledTaskModel.sync({ alter: true });
+    await StickerModel.sync({ alter: true });
 
     this.assignment = new AssignmentService(this, this.logger);
     await this.assignment.initService();

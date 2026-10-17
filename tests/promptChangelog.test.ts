@@ -15,7 +15,7 @@ async function setup() {
   await fs.writeFile(changelogPath, JSON.stringify([{ date: '2026-10-10T12:00:00+08:00', summary: 'No --- dividers.' }]));
   const users = Object.create(UserService.prototype) as UserService;
   Object.assign(users, {
-    store: { toolCallHist: { followTrail: async () => [] } },
+    store: { toolCallHist: { trailsFor: async () => new Map() } },
     generateUserStringFromJid: async (jid: string) => jid,
     promptChangelogPath: changelogPath,
   });

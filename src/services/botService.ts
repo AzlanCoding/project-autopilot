@@ -1,6 +1,6 @@
 import P from "pino";
 import { Boom } from '@hapi/boom';
-import makeWASocket, { fetchLatestBaileysVersion, AuthenticationState, CacheStore, DisconnectReason, generateMessageIDV2, isJidNewsletter, proto, getAggregateVotesInPollMessage, BaileysEventEmitter, WAMessage, jidNormalizedUser } from 'baileys';
+import makeWASocket, { downloadMediaMessage, fetchLatestBaileysVersion, AuthenticationState, CacheStore, DisconnectReason, generateMessageIDV2, isJidNewsletter, proto, getAggregateVotesInPollMessage, BaileysEventEmitter, WAMessage, jidNormalizedUser } from 'baileys';
 import BaileysBottle from 'baileys-bottle-devstroupe';
 import NodeCache from '@cacheable/node-cache';
 import qrcode from 'qrcode-terminal';
@@ -10,11 +10,38 @@ import { BufferSystem } from './bufferSystem';
 import { decideGroupReply, DecisionMsg, ReplyDecision } from './replyDecision';
 import type Store from "./store";
 import type AI from "./ai";
-import type { ChatAdapter } from "./ai";
+import type { ChatAdapter, ChatMedia } from "./ai";
+import { chatContext } from './chatContext';
+import { toUnixSeconds } from '../utils/common';
+import { VIDEO_ENABLED } from '../config/media';
+import type { Sticker } from '../models/Sticker';
 import { EasyInputMessage, ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
 
 const BOTTLE_STORE_NAME = 'sofia';
+
+/**
+ * Text shown to Sofia for a message. Media get a `media_id` (the WhatsApp message id) she can pass to `view_media`,
+ * e.g. `<WhatsApp Image media_id=3EB0...> caption`. Returns undefined for messages without text or supported media.
+ */
+export function describeContent(m: proto.IMessage, id?: string | null, { videos = VIDEO_ENABLED } = {}): string | undefined {
+  const mediaId = id ? ` media_id=${id}` : '';
+  const caption = (c?: string | null) => c ? ` ${c}` : '';
+  if (m.stickerMessage) {
+    return `<WhatsApp Sticker${mediaId}${m.stickerMessage.isAnimated ? ' (animated)' : ''}>`;
+  }
+  if (m.videoMessage) {
+    return m.videoMessage.gifPlayback
+      ? `<WhatsApp GIF${mediaId} (moving)>${caption(m.videoMessage.caption)}`
+      : videos
+        ? `<WhatsApp Video${mediaId}>${caption(m.videoMessage.caption)}`
+        : `<WhatsApp Video (can't be viewed)>${caption(m.videoMessage.caption)}`;
+  }
+  if (m.imageMessage) {
+    return `<WhatsApp Image${mediaId}>${caption(m.imageMessage.caption)}`;
+  }
+  return m.conversation || m.extendedTextMessage?.text || undefined;
+}
 
 /**
  * Binds the baileys-bottle store with two fixes for lost chat history:
@@ -77,6 +104,10 @@ export class SofiaBot implements ChatAdapter {
   db: Store;
   store?: StoreHandle;
   bufferSystem: BufferSystem;
+  /** Message id -> jid it is stored under, filled by `loadChat`, used to find media for `view_media`. */
+  private mediaIndex = new Map<string, string>();
+  /** Quoted message id -> the quoted message, for quoted media whose original message isn't in the store. */
+  private quotedMediaIndex = new Map<string, WAMessage>();
   /** Chat id -> the newest message Sofia has seen (replied to, chose not to reply to, or saw mid-reply). In memory only. */
   private lastSeen: { [chatId: string]: { id?: string, time: number } | undefined } = {};
   private saveAuthState?: () => Promise<any>;
@@ -210,7 +241,12 @@ export class SofiaBot implements ChatAdapter {
 
           if (upsert.type === 'notify') {
             for (const msg of upsert.messages) {
-              if (msg.message?.conversation || msg.message?.extendedTextMessage?.text) {
+              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage);
+              if (!msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
+                // Received stickers and GIFs are saved as pending until approved in the web UI
+                this.saveReceivedStickerGif(msg).catch(e => this.logger.error(e, 'Failed to save received sticker/GIF'));
+              }
+              if (msg.message?.conversation || msg.message?.extendedTextMessage?.text || isMedia) {
                 const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
 
                 if (text === "requestPlaceholder" && !upsert.requestId) {
@@ -240,7 +276,8 @@ export class SofiaBot implements ChatAdapter {
                       await this.sock!.readMessages([msg.key]);
                       // The sender just sent a message so they are no longer typing.
                       this.bufferSystem.setTyping(msg.key.remoteJid, msg.key.participant || msg.key.remoteJid, false);
-                      this.bufferSystem.bufferCall(msg.key.remoteJid, (async () => {
+                      // chatContext tells tools like send_sticker_gif and view_media which chat Sofia is replying in
+                      this.bufferSystem.bufferCall(msg.key.remoteJid, () => chatContext.run({ chatId: msg.key.remoteJid! }, async () => {
                         const isGroup = msg.key.remoteJid!.endsWith('@g.us');
                         let stopTyping: (() => Promise<void>) | undefined;
                         try {
@@ -345,7 +382,7 @@ export class SofiaBot implements ChatAdapter {
                         finally {
                           await stopTyping?.();
                         }
-                      }).bind(this));
+                      }));
                     } else {
                       this.logger.error('Error getting msg.key.remoteJid, value is null or undefined!');
                     }
@@ -528,9 +565,12 @@ export class SofiaBot implements ChatAdapter {
       return [];
     }
 
-    let messages = (await this.store.messages.all(remoteJidAlt || remoteJid)) || []
+    let messages: WAMessage[] = (await this.store.messages.all(remoteJidAlt || remoteJid)) || [];
+    messages.forEach(m => m.key.id && this.mediaIndex.set(m.key.id, remoteJidAlt || remoteJid));
     if (remoteJidAlt && remoteJidAlt != remoteJid) {
-      messages = [...messages, ...((await this.store.messages.all(remoteJid)) || [])]
+      const more: WAMessage[] = (await this.store.messages.all(remoteJid)) || [];
+      more.forEach(m => m.key.id && this.mediaIndex.set(m.key.id, remoteJid));
+      messages = [...messages, ...more];
     }
     const parseMentions = async (m: WAMessage | proto.IMessage, text?: string | null) => {
       if (!text) {
@@ -579,17 +619,21 @@ export class SofiaBot implements ChatAdapter {
       }
       return text;
     };
-    const getText = (m: WAMessage) => m.message?.stickerMessage ? `<WhatsApp Sticker Or GIF>` : m.message?.videoMessage ? `<WhatsApp Video> ${m.message.videoMessage.caption || ""}` : m.message?.imageMessage ? `<WhatsApp Image> ${m.message.imageMessage.caption || ""}` : m.message?.conversation || m.message?.extendedTextMessage?.text;
-    const getQuotedText = (q: proto.IMessage) => this.shortenQuotedText(q.stickerMessage ? `<WhatsApp Sticker Or GIF>` : q?.videoMessage ? `<WhatsApp Video> ${q.videoMessage.caption || ""}` : q.imageMessage ? `<WhatsApp Image> ${q.imageMessage.caption || ""}` : q.conversation || q.extendedTextMessage?.text);
+    const getText = (m: WAMessage) => m.message ? describeContent(m.message, m.key.id) : undefined;
+    const getQuotedText = (q: proto.IMessage, id?: string | null) => this.shortenQuotedText(describeContent(q, id));
     const getContextInfo = (m: WAMessage) => m.message?.extendedTextMessage?.contextInfo || m.message?.imageMessage?.contextInfo || m.message?.videoMessage?.contextInfo || m.message?.stickerMessage?.contextInfo;
     const toChatMsg = async (m: WAMessage, user: string | null): Promise<PreProccessChatMsg> => {
       const contextInfo = getContextInfo(m);
+      if (contextInfo?.quotedMessage && contextInfo.stanzaId) {
+        // Quoted media can be downloaded from the quote itself if the original message isn't in the store
+        this.quotedMediaIndex.set(contextInfo.stanzaId, { key: { remoteJid, id: contextInfo.stanzaId, participant: contextInfo.participant }, message: contextInfo.quotedMessage });
+      }
       return {
         id: m.key.id || undefined,
         user,
-        time: (m.messageTimestamp as any).low || m.messageTimestamp,
+        time: toUnixSeconds(m.messageTimestamp),
         text: await parseMentions(m, getText(m)) as string,
-        quotedMessage: m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? await parseMentions(m.message.extendedTextMessage.contextInfo.quotedMessage, getQuotedText(m.message.extendedTextMessage.contextInfo.quotedMessage)) : null,
+        quotedMessage: contextInfo?.quotedMessage ? await parseMentions(contextInfo.quotedMessage, getQuotedText(contextInfo.quotedMessage, contextInfo.stanzaId)) : null,
         mentionsAI: !!contextInfo?.mentionedJid?.some(j => this.isOwnJid(j)),
         quotesAI: !!contextInfo?.quotedMessage && this.isOwnJid(contextInfo.participant),
       };
@@ -606,18 +650,99 @@ export class SofiaBot implements ChatAdapter {
   /**
    * Sends a text message to a user id or group id (ending with `@g.us`).
    */
+  /** WhatsApp jid for a user id, group id (ending with `@g.us`) or jid. */
+  private async resolveJid(id: string) {
+    if (id.includes('@')) {
+      return id;
+    }
+    const user = await this.db.user.findById(id);
+    if (!user) {
+      throw Error(`Unknown user with id ${id}`);
+    }
+    return user.whatsapp_jid;
+  }
+
+  public async sendStickerGif(id: string, sticker: Sticker): Promise<void> {
+    if (!this.sock) {
+      throw Error("Bot is not connected.");
+    }
+    const buffer = await this.db.stickers.readFile(sticker);
+    // Baileys copies `isAnimated` into the sticker message, WhatsApp GIFs are mp4 videos played as GIFs
+    await this.sock.sendMessage(await this.resolveJid(id), sticker.kind == 'sticker'
+      ? { sticker: buffer, isAnimated: sticker.animated }
+      : { video: buffer, gifPlayback: true, mimetype: 'video/mp4' });
+  }
+
+  private downloadMedia(msg: WAMessage) {
+    return downloadMediaMessage(msg, 'buffer', {}, { logger: this.logger as any, reuploadRequest: this.sock!.updateMediaMessage });
+  }
+
+  /**
+   * Downloads media by its `media_id` (the WhatsApp message id). Looks in the chat it was loaded from, then the current
+   * chat, then quotes. Old media is re-uploaded by the sender's phone if WhatsApp no longer has it.
+   */
+  public async getMedia(mediaId: string): Promise<ChatMedia> {
+    if (!this.sock || !this.store) {
+      throw Error("Bot is not connected.");
+    }
+    const jids = [this.mediaIndex.get(mediaId), chatContext.getStore()?.chatId].filter((j): j is string => !!j);
+    let msg: WAMessage | undefined;
+    for (const jid of jids) {
+      msg = (await this.store.messages.id(jid, mediaId)) || undefined;
+      if (msg?.message) break;
+    }
+    if (!msg?.message) {
+      msg = this.quotedMediaIndex.get(mediaId);
+    }
+    const content = msg?.message;
+    if (!msg || !content || !(content.imageMessage || content.stickerMessage || content.videoMessage)) {
+      throw Error(`No image, sticker, GIF or video with media_id "${mediaId}" found.`);
+    }
+    if (content.videoMessage && !content.videoMessage.gifPlayback && !VIDEO_ENABLED) {
+      // Checked before downloading, which is the expensive part
+      throw Error("Viewing videos is turned off. Tell them you can't watch videos, and ask what it shows if it matters.");
+    }
+    const buffer = await this.downloadMedia(msg);
+    if (content.stickerMessage) {
+      return { buffer, mime: 'image/webp', kind: 'sticker' };
+    }
+    if (content.videoMessage) {
+      return { buffer, mime: content.videoMessage.mimetype || 'video/mp4', kind: content.videoMessage.gifPlayback ? 'gif' : 'video' };
+    }
+    return { buffer, mime: content.imageMessage!.mimetype || 'image/jpeg', kind: 'image' };
+  }
+
+  /** Saves a received sticker or GIF to the sticker library as pending, unless it is already saved. */
+  private async saveReceivedStickerGif(msg: WAMessage) {
+    const sticker = msg.message?.stickerMessage;
+    const gif = msg.message?.videoMessage?.gifPlayback ? msg.message.videoMessage : undefined;
+    const media = sticker || gif;
+    if (!media) {
+      return;
+    }
+    // WhatsApp's fileSha256 is the SHA-256 of the file, the same hash the library uses to skip duplicates
+    if (media.fileSha256 && await this.db.stickers.findBySha256(Buffer.from(media.fileSha256).toString('base64'))) {
+      return;
+    }
+    const { sticker: saved, created } = await this.db.stickers.add({
+      buffer: await this.downloadMedia(msg),
+      mime: sticker ? 'image/webp' : 'video/mp4',
+      kind: sticker ? 'sticker' : 'gif',
+      source: 'received',
+      status: 'pending',
+      original: true,
+      receivedFrom: msg.key.participantAlt || msg.key.participant || msg.key.remoteJidAlt || msg.key.remoteJid,
+    });
+    if (created) {
+      this.logger.info(`Saved received ${saved.kind} ${saved.id}, waiting for approval`);
+    }
+  }
+
   public async sendMessage(id: string, text: string): Promise<void> {
     if (!this.sock) {
       throw Error("Bot is not connected.");
     }
-    let jid = id;
-    if (!id.endsWith('@g.us')) {
-      const user = await this.db.user.findById(id);
-      if (!user) {
-        throw Error(`Unknown user with id ${id}`)
-      }
-      jid = user.whatsapp_jid;
-    }
+    const jid = await this.resolveJid(id);
     const replyMsg: WAMessage = {
       message: {
         conversation: `I am an AI Agent`
