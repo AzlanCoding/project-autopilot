@@ -7,6 +7,8 @@ import { createLogger } from './src/config/logger';
 import readline from 'readline';
 import getCalendarEvents from './src/utils/getCalendarEvents';
 import { Cron } from "croner";
+import moment from 'moment-timezone';
+import { describeDateWeek } from './src/utils/common';
 
 
 const main = async () => {
@@ -36,27 +38,40 @@ const main = async () => {
     (async () => {
       logger.info(`Daily Message Job executing`);
       const data = await ai.timetableTool.func({});
+      // Worked out here so Sofia doesn't need a tool call for it
+      const week = describeDateWeek(moment.tz('Asia/Singapore').format('YYYY-MM-DD'));
       if (data == "No events found for the specified date.") {
         logger.info(`Daily Message Job Cancelled due to no events`);
         return;
       }
       await db.ai_scheduled_task_runner!(
-        async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class.
-        For the following subjects, student's are split into 3 different specialization with the following subjects:
-        Applied AI & Operations
-        - IT2122: APPLIED DEEP LEARNING
-        - IT2123: APPLIED MACHINE LEARNING
-        - IT2124: MACHINE LEARNING OPERATIONS
-        DevOps & Automation in the Cloud
-        - IT2125: CLOUD ARCHITECTURE
-        - IT2126: CLOUD DEVELOPMENT
-        - IT2127: CLOUD OPERATIONS
-        Applied AI & Operations
-        - IT2128: APPLICATION SECURITY
-        - IT2129: CYBERSECURITY ATTACK & DEFENCE
-        - IT2130: CYBER FORENSIC TECHNOLOGIES & PROCESS
-        Start with the modules that everyone has to take (such as responsible AI for sustainability), and then group by the specialization.
-        Send the whole thing as 1 message.`
+        async () => `Send the daily 7am morning message with today's timetable to the "NYP IT2504 PEM & PCS" group chat (get it from list_groups; never use the folder-only "NYP IT2504" group).
+Today's timetable (from get_timetable) is below, already split into one section per specialisation track, each titled with that track's calendar name (e.g. "IT2504 Applied AI & Operations Timetable"). Today's semester and week number are below too, no tool calls are needed for them.
+Send the whole thing as 1 message. Do not end with any question to the class.
+
+Structure the message exactly like this:
+
+1. Opening line: greeting + weekday + date + Semester and Week number.
+2. Then these three sections, in this order, one for each section of the timetable. Each section lists every class for that track, including the modules the whole class takes (e.g. IT2121 Responsible AI for Sustainability, IT2134 IT Innovation Project, IT-DIT PEM contact time):
+*🤖 Applied AI & Operations* — IT2122 Applied Deep Learning, IT2123 Applied Machine Learning, IT2124 Machine Learning Operations
+*☁️ DevOps & Automation in the Cloud* — IT2125 Cloud Architecture, IT2126 Cloud Development, IT2127 Cloud Operations
+*🔐 Cybersecurity* — IT2128 Application Security, IT2129 Cybersecurity Attack & Defence, IT2130 Cyber Forensic Technologies & Process
+3. Under each heading, one bullet per timetable block, in time order, keeping every detail from the timetable:
+- 09:00 - 11:50 · IT2122 Applied Deep Learning · LAB02 · Room L.532
+4. Blocks marked (ELEARN) have no time. Write them like this, and never give them a time:
+- IT2121 Responsible AI for Sustainability · LEC01 · e-learning, do it anytime today
+E-learning is own pace, own target, for everybody.
+5. If a section has no blocks today, write exactly:
+- No lessons for today
+Never say "no on-campus lesson" — there may still be e-learning.
+6. Close with one warm encouraging line.
+
+Accuracy rule (most important): transcribe EVERY block from the timetable exactly once per section, with its module code, times, section and room. Do not merge sections, paraphrase away or drop any lesson. Before sending, count the blocks in each section of the timetable and the bullets in that section of your message — they must match. Never invent a lesson that is not in the timetable.
+
+Today's semester and week: ${week}
+
+Today's timetable:
+${data}`
       );
 
       logger.info(`Daily Message Job Finished executed`);

@@ -502,7 +502,7 @@ export default class AI {
 
     this.timetableTool = new ExtendedDynamicStructuredTool({
       name: "get_timetable",
-      description: "Get the timetable for a specific day. Note that events that start with (ELEARN) are e-learning lessons and can be done at any time.",
+      description: "Get the timetable for a specific day. Note that events that start with (ELEARN) are e-learning lessons and can be done at any time. Lessons are split into one section per timetable calendar, titled with the calendar's name (e.g. one per specialisation track), each listing all of its classes in time order, including the modules the whole class takes. \"No lessons for today\" means that calendar has no lessons that day.",
       schema: z.object({
         date: z.string().optional().describe("[Optional] The date of the timetable in the format DD/MM/YYYY. If not provided, it will return the current day's timetable."),
       }),

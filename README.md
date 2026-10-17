@@ -42,8 +42,9 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 ## Important Notes
 *   When messages are scheduled to be sent, the messages should only be written when they are scheduled so that any context of new memory can be used.    
 *   When changing `src/static/prompts/system.md`, add an entry to `src/static/prompts/changelog.json` with the time the change goes live and what Sofia should do differently. A note is inserted into her chat history at that point so she stops copying the style of her older messages.
-    
-  
+*   `GOOGLE_CAL_ID` can list several Google Calendars, comma separated, e.g. one per specialisation track. `get_timetable` lists each calendar as its own section, titled with the calendar's name (e.g. "IT2504 Applied AI & Operations Timetable") in the order listed, with its classes in time order. With one calendar the timetable isn't split into sections.
+
+
 ## Running
 *   `pnpm run run` builds and starts the bot. Set `CHAT_MODEL` in `.env` to change the Alibaba Model Studio model (defaults to `qwen3.8-flash`). Set `MODELSTUDIO_WORKSPACE_URL` to your workspace's OpenAI compatible URL (e.g. `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`), it is needed for the decision model that decides when Sofia replies in group chats.
 *   `pnpm test` runs the unit tests. `LIVE_TESTS=true pnpm test` also runs hand written group chats against the real decision model to check when Sofia replies (`tests/replyDecision.test.ts`).
