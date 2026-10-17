@@ -22,6 +22,7 @@ import type { PreProccessChatMsg } from './botService';
 import type { Sticker } from '../models/Sticker';
 import { ModelImage, toModelImage } from '../utils/media';
 import { chatContext } from './chatContext';
+import { aboutToActProbability, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
@@ -79,6 +80,8 @@ export interface ScheduledTaskRunOptions {
 export default class AI {
   ai_user_id: string = "ea502c0f-7fe6-4f7c-9d63-80dd7b0de90e";
   test_mode: boolean = (process.env.TESTING != undefined && process.env.TESTING.toLowerCase() == "true");
+  /** How likely the end of a reply says Sofia is about to act without having done it, see `unfinishedReply.ts`. */
+  aboutToAct: (text: string) => Promise<number> = aboutToActProbability;
   /** Set by the CLI test harness so the system prompt tells the model it is being tested. */
   cli_mode: boolean = false;
   logger: Logger;
@@ -1375,6 +1378,8 @@ ${await message()}`,
       let buffer = "";
       // Set when a tool ends the reply (`end_message`, or a send tool with `end_message: true`)
       let ended = false;
+      // Sofia gets one nudge per reply when she says she's about to do something but stops without a tool call
+      let nudged = false;
 
       // // Helper to flush buffer as chunk_display
       // const flushBuffer = (delimiter: boolean) => {
@@ -1403,6 +1408,8 @@ ${await message()}`,
         data: ResponseInputItem.FunctionCallOutput
       }> {
         let hasToolCalls = false;
+        // Text of this response, checked for "about to do something" endings when there are no tool calls
+        let responseText = "";
         // Images from tools (`view_media`), added after this turn's tool outputs
         const images: EasyInputMessage[] = [];
         instance.logger.info(chatHistory, "CHAT HISTORY CREATED");
@@ -1532,6 +1539,7 @@ ${await message()}`,
               const text = event.item.content.map(c => c.type == 'output_text' ? c.text : '').join('');
               if (text.trim()) {
                 chatHistory.push({ role: 'assistant', content: text, type: 'message' } as EasyInputMessage);
+                responseText += text;
               }
             }
             else if (event.item.type == 'reasoning') {
@@ -1588,6 +1596,28 @@ ${await message()}`,
           return;
         }
 
+        // The response ended with text only. If it says Sofia is about to do something, she stopped before doing it.
+        if (!nudged && responseText.trim()) {
+          // Send the rest of the text first so the check doesn't delay it
+          if (buffer) {
+            yield { type: "chunk_display", content: buffer, delimiter: false };
+            buffer = "";
+          }
+          let p = 0;
+          try {
+            p = await (instance.aboutToAct ?? aboutToActProbability)(responseText.trim());
+          }
+          catch (e) {
+            instance.logger.error(e, 'Unfinished reply check failed');
+          }
+          instance.logger.info({ aboutToAct: p, ending: responseText.trim().slice(-200) }, 'Unfinished reply check');
+          if (p >= UNFINISHED_THRESHOLD) {
+            nudged = true;
+            chatHistory.push({ role: 'system', content: UNFINISHED_NUDGE, type: 'message' } as EasyInputMessage);
+            yield* handleStream(instance);
+            return;
+          }
+        }
       }
 
       for await (const event of handleStream(this)) {
@@ -1653,7 +1683,7 @@ ${await message()}`,
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.
-    Additionally, before using the \`send_message\` tool call, make sure to show the user what message you're sending.${this.testModePrompt()}`
+    Additionally, when you use the \`send_message\` tool call, show the user what you're sending in the same response as the tool call.${this.testModePrompt()}`
     // Available Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }

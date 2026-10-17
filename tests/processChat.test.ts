@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import pino from 'pino';
 import { z } from 'zod';
 import AI from '../src/services/ai';
+import { UNFINISHED_NUDGE } from '../src/services/unfinishedReply';
 
 /** Builds an AI instance with a fake Responses API that streams `turns` (one list of output items per request). */
 function fakeAI(turns: any[][], extraTools: any[] = []) {
@@ -11,6 +12,7 @@ function fakeAI(turns: any[][], extraTools: any[] = []) {
   Object.assign(ai, {
     logger: pino({ level: 'silent' }),
     memoryQueryTool: { func: async () => '[]' },
+    aboutToAct: async () => 0, // Never nudge unless a test says so
     tools: [{ name: 'memory_write', description: 'Save a memory', schema: z.object({ text: z.string() }), invoke: async () => 'Memory saved.' }, ...extraTools],
     openai: {
       responses: {
@@ -128,4 +130,60 @@ test('an image from view_media is shown to the model after the tool outputs', as
   assert.match(output.output, /first frame/);
   assert.equal(shown.role, 'user');
   assert.deepEqual(shown.content[1], { type: 'input_image', image_url: image.dataUrl, detail: 'auto' });
+});
+
+/** Runs a reply, logging what is sent to the user and when the unfinished-reply check runs. */
+async function runLogged(ai: AI, probabilities: (number | Error)[]) {
+  const log: string[] = [];
+  ai.aboutToAct = async (text: string) => {
+    log.push(`check: ${text}`);
+    const p = probabilities.shift() ?? 0;
+    if (p instanceof Error) throw p;
+    return p;
+  };
+  for await (const y of ai.processChatv3([{ role: 'user', content: 'Azlan:\nsend a test to the testing group', type: 'message' }])) {
+    if (y.type == 'chunk_display') log.push(`sent: ${y.content}`);
+    if (y.type == 'tool_call') log.push(`tool: ${(y as any).data.name}`);
+  }
+  return log;
+}
+
+test('a reply that stops at "Going in now!" without a tool call gets one nudge, and then does it', async () => {
+  const calls: string[] = [];
+  const { ai, requests } = fakeAI([
+    [message("Here's what I'm sending\n\nGoing in now! 🚀")],
+    [call('send_message', { id: 'grp', messages: ['test'] })],
+    [message('Sent! ✅')],
+  ], [fakeTool('send_message', calls)]);
+  const log = await runLogged(ai, [0.94]);
+  assert.deepEqual(log, [
+    "sent: Here's what I'm sending",
+    'sent: Going in now! 🚀', // The last chunk reaches the user before the check runs
+    "check: Here's what I'm sending\n\nGoing in now! 🚀",
+    'tool: send_message',
+    'sent: Sent! ✅', // Not checked again: only one nudge per reply
+  ]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(requests[1].slice(-1)[0], { role: 'system', content: UNFINISHED_NUDGE, type: 'message' });
+});
+
+test('a finished reply is not nudged', async () => {
+  const { ai, requests } = fakeAI([[message('Monday is Responsible AI at 9am ✨')]]);
+  assert.deepEqual(await runLogged(ai, [0.02]), ['sent: Monday is Responsible AI at 9am ✨', 'check: Monday is Responsible AI at 9am ✨']);
+  assert.equal(requests.length, 1);
+});
+
+test('Sofia is only nudged once per reply, and a failing check does not break the reply', async () => {
+  const twice = fakeAI([[message('Let me check!')], [message('Give me a sec!')], [message('never requested')]]);
+  assert.deepEqual(await runLogged(twice.ai, [0.9, 0.9]), ['sent: Let me check!', 'check: Let me check!', 'sent: Give me a sec!']);
+  assert.equal(twice.requests.length, 2);
+
+  const failing = fakeAI([[message('Going in now!')]]);
+  assert.deepEqual(await runLogged(failing.ai, [Error('decision model down')]), ['sent: Going in now!', 'check: Going in now!']);
+  assert.equal(failing.requests.length, 1);
+});
+
+test('a reply ended by a tool is not checked', async () => {
+  const { ai } = fakeAI([[message('Anytime!\n\n'), call('end_message', {})]], [fakeTool('end_message', [], 'Reply ended.')]);
+  assert.deepEqual(await runLogged(ai, [0.9]), ['sent: Anytime!', 'tool: end_message']);
 });

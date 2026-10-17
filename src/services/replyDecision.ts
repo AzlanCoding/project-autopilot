@@ -105,19 +105,24 @@ export function decideFromAnswers(a: DecisionAnswers, { quotesAI = false, sofiaR
   return { reply: false, reason: `to ${a.addressee.choice}`, answers: a };
 }
 
-/** Asks the decision model about the last message of `messages`. Throws if the API fails. */
-export async function askDecisionModel(messages: DecisionMsg[], signal?: AbortSignal): Promise<DecisionAnswers> {
+/** Asks the decision model `questions` about `state` and returns its answers. Throws if the API fails. */
+export async function systemOne(state: string, questions: object, signal?: AbortSignal): Promise<any> {
   const res = await fetch(`${MODELSTUDIO_BASE_URL}/systemone`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${process.env.ALIBABA_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: DECISION_MODEL, state: buildState(messages), questions: QUESTIONS }),
+    body: JSON.stringify({ model: DECISION_MODEL, state, questions }),
     signal: signal ?? AbortSignal.timeout(10000),
   });
   const body = await res.json().catch(() => null) as any;
-  if (!res.ok || !body?.answers?.addressee || !body.answers.kind) {
+  if (!res.ok || !body?.answers || Object.keys(questions).some(q => !body.answers[q])) {
     throw Error(`Decision model request failed (HTTP ${res.status}): ${JSON.stringify(body)}`);
   }
   return body.answers;
+}
+
+/** Asks the decision model about the last message of `messages`. Throws if the API fails. */
+export async function askDecisionModel(messages: DecisionMsg[], signal?: AbortSignal): Promise<DecisionAnswers> {
+  return systemOne(buildState(messages), QUESTIONS, signal);
 }
 
 /**

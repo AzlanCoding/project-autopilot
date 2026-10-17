@@ -52,6 +52,19 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Docker: `docker compose up -d --build` starts Milvus and the bot (if Milvus is not ready yet, the bot exits and Docker restarts it), then scan the QR code from `docker compose logs -f sofia`. Everything restarts unless stopped. `.env` and `assets/` are mounted into the container.
 
 
+## Known Issues
+### Sofia says she'll do something, then stops ("ghosting")
+Sometimes Sofia ends a reply by announcing an action without actually doing it, e.g. "Going in now! 🚀" right before she was meant to send a message, and then nothing happens. The model response finished normally (`response.completed`) with only text and no tool call, so Qwen decided it was done. It isn't the OpenAI client: DashScope sends no hidden "completed" signal, the Chat Completions route behaves the same, and replaying the exact request that ghosted 60 times (streamed, not streamed, Chat Completions, thinking off) never reproduced it. `tool_choice: "required"` would force a tool call every turn, but DashScope only allows it with a single tool.
+
+It matches a known Qwen3 issue with thinking mode, [QwenLM/Qwen3#1817](https://github.com/QwenLM/Qwen3/issues/1817):
+> Thinking mode plans tool calls but fails to execute them ~60% of the time
+
+where the reporter describes the model planning the tool call in its reasoning, then responding as if it had been made. Sofia's reasoning when she ghosted read: *"I'm planning to test the new multi-message format by sending three bite-sized messages to the Testing Group Chat, then I'll show Azlan what I'm sending and confirm once it goes through."*
+
+Workarounds (`src/services/unfinishedReply.ts`):
+*   When a reply ends with text and no tool call, the decision model checks how it ends. If it says she is about to act (score of 0.3 or more), she is told to make the tool call or call `end_message`, and gets one more turn. Only one nudge per reply. Every check is logged as `Unfinished reply check` with its score, so the threshold can be tuned.
+*   The prompt tells her to make the tool call in the same response as announcing it, and `send_message` no longer asks her to show the message *before* calling it.
+
 ## TODO
 *   ~~Add Tool Calls to chat history~~
 *   ~~Change prompts to `AI Class Assistant` instead of class chairperson.~~
@@ -62,4 +75,4 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   ~~Change memory tool. Make it tell sofia related memory and suggest to delete when creating memory.~~
 *   PDF Document Support
 *   Web Console
-*   Sticker & GIF support.
+*   ~~Sticker & GIF support.~~
