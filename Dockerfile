@@ -25,7 +25,7 @@ COPY --from=build /app/dist ./dist
 # The system prompt is read from src/static at runtime
 COPY src/static ./src/static
 
-# assets/ holds settings.json and the Google Calendar credentials, mount it in.
+# assets/ holds the Google Calendar credentials and stickers, mount it in.
 # Environment variables (.env) should be passed with --env-file.
 VOLUME ["/app/assets"]
 

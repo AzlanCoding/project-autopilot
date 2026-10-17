@@ -34,7 +34,6 @@ The bot's *personality* is more important than its functionality. All AI-generat
 
 ### C. Data & Management
 *   **Memory:** Must maintain and prepend a *universal memory* context into the prompt for every major AI query to ensure continuity.
-*   **Settings:** A dedicated, easily editable settings file must map group chat JIDs to their human-readable names.
 *   **Web Console:** The web console will manage stickers/GIFs, approving incoming ones, and providing administrative oversight.
 
 ## ⚠️ 5. Development & Coding Best Practices

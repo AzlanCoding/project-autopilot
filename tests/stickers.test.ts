@@ -6,7 +6,7 @@ import * as path from 'path';
 import pino from 'pino';
 import sharp from 'sharp';
 import { StickerService } from '../src/services/stickerService';
-import { startWebServer } from '../src/services/webServer';
+import { startWebServer, toWhatsappJid } from '../src/services/webServer';
 import { describeContent } from '../src/services/botService';
 
 /** In-memory stand-ins for the Sequelize model and Milvus. */
@@ -109,6 +109,61 @@ test('the web UI needs the password and rejects files that cannot become a stick
     const bad = await fetch(`${base}/api/stickers?kind=sticker`, { method: 'POST', headers: { ...auth('secret'), 'Content-Type': 'video/mp4' }, body: 'x' });
     assert.equal(bad.status, 400);
     assert.equal((await fetch(`${base}/`, { headers: auth('secret') })).status, 200);
+  }
+  finally {
+    server.close();
+  }
+});
+
+test('phone numbers become the WhatsApp jid the bot looks users up by', () => {
+  assert.equal(toWhatsappJid('+65 9123 4567'), '6591234567@s.whatsapp.net');
+  assert.equal(toWhatsappJid('6591234567'), '6591234567@s.whatsapp.net');
+  assert.equal(toWhatsappJid(' 6591234567@s.whatsapp.net '), '6591234567@s.whatsapp.net');
+  assert.throws(() => toWhatsappJid('9123'), /country code/);
+  assert.throws(() => toWhatsappJid('100000000000001@lid'), /phone number jid/);
+});
+
+test('users can be listed, added, edited and deleted from the web UI', async () => {
+  const users: any[] = [{ id: '11111111-1111-1111-1111-111111111111', name: 'Zed', description: '', whatsapp_jid: '6500000001@s.whatsapp.net' }];
+  const uniqueError = () => Object.assign(new Error('Validation error'), { name: 'SequelizeUniqueConstraintError' });
+  const user = {
+    findAll: async () => users,
+    findById: async (id: string) => users.find(u => u.id == id) ?? null,
+    create: async (data: any) => {
+      if (users.some(u => u.whatsapp_jid == data.whatsapp_jid)) throw uniqueError();
+      const u = { id: '22222222-2222-2222-2222-222222222222', ...data };
+      users.push(u);
+      return u;
+    },
+    update: async (id: string, data: any) => { const u = users.find(u => u.id == id); return u ? Object.assign(u, data) : null; },
+    destroy: async (id: string) => { users.splice(users.findIndex(u => u.id == id), 1); },
+  };
+  Object.assign(process.env, { WEBUI_PASSWORD: 'secret', WEBUI_PORT: '0' });
+  const server = startWebServer({ user } as any, pino({ level: 'silent' }))!;
+  await new Promise(r => server.once('listening', r));
+  const base = `http://127.0.0.1:${(server.address() as any).port}/api/users`;
+  const headers = { Authorization: `Basic ${Buffer.from('azlan:secret').toString('base64')}`, 'Content-Type': 'application/json' };
+  const call = async (method: string, url: string, body?: object) => {
+    const res = await fetch(url, { method, headers, body: body && JSON.stringify(body) });
+    return { status: res.status, body: res.status == 204 ? null : await res.json() };
+  };
+  try {
+    const added = await call('POST', base, { name: ' Azlan ', whatsapp_jid: '+65 9000 0001', description: 'Created Sofia' });
+    assert.equal(added.status, 201);
+    assert.deepEqual([added.body.name, added.body.whatsapp_jid], ['Azlan', '6590000001@s.whatsapp.net']);
+    assert.deepEqual((await call('GET', base)).body.map((u: any) => u.name), ['Azlan', 'Zed']);
+
+    assert.equal((await call('POST', base, { name: 'Copy', whatsapp_jid: '6590000001' })).status, 409);
+    assert.equal((await call('POST', base, { name: 'No number' })).status, 400);
+    assert.equal((await call('POST', base, { whatsapp_jid: '6590000001' })).status, 400);
+
+    const edited = await call('PATCH', `${base}/${added.body.id}`, { description: 'Class chairperson' });
+    assert.deepEqual([edited.status, edited.body.description, edited.body.name], [200, 'Class chairperson', 'Azlan']);
+    assert.equal((await call('PATCH', `${base}/not-a-uuid`, { name: 'x' })).status, 404);
+
+    assert.equal((await call('DELETE', `${base}/${added.body.id}`)).status, 204);
+    assert.equal((await call('DELETE', `${base}/${added.body.id}`)).status, 404);
+    assert.deepEqual((await call('GET', base)).body.map((u: any) => u.name), ['Zed']);
   }
   finally {
     server.close();

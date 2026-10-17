@@ -1,4 +1,3 @@
-import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { MilvusClient, QueryResults } from '@zilliz/milvus2-sdk-node';
@@ -21,18 +20,15 @@ import { MODELSTUDIO_BASE_URL } from '../config/modelStudio';
 import { Sticker } from '../models/Sticker';
 import { StickerService } from './stickerService';
 
-const SETTINGS_PATH = './assets/settings.json';
 // Shown to the AI after a memory_write so it can clean up overlapping memories.
 const SIMILAR_MEMORY_TOP_K = 5;
 const SIMILAR_MEMORY_MAX_DISTANCE = 0.8; // Squared L2 on unit vectors, roughly cosine similarity >= 0.6
-interface AppSettings { subjects: { [k: string]: string }; reminders: number[]; }
 
 
 export default class Store {
   db: Sequelize;
   milvus: MilvusClient;
   milvusCollectionName = 'memories_vectors';
-  settings: AppSettings;
   assignment: AssignmentService;
   assessment: AssessmentService;
   toolCallHist: ToolCallHistService;
@@ -48,11 +44,7 @@ export default class Store {
     if (!process.env.SQL_DATABASE_URL) {
       throw Error(`Environment variable 'SQL_DATABASE_URL' is not defined`)
     }
-    if (!fs.existsSync(SETTINGS_PATH)) {
-      throw new Error('`settings.json` is missing!');
-    }
     this.db = new Sequelize(process.env.SQL_DATABASE_URL);
-    this.settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
 
     const milvusAddr = process.env.MILVUS_ADDRESS ?? 'localhost:19530';
     this.milvus = new MilvusClient({ address: milvusAddr });
@@ -110,7 +102,6 @@ export default class Store {
     // }
   }
   async postSockInit() { }
-
 
   // Embedding provider: replace modelName/config as needed
   async getEmbedding(text: string): Promise<number[]> {

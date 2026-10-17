@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sofia Admin</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
+  <style>
+    .preview { height: 180px; display: flex; align-items: center; justify-content: center; background: repeating-conic-gradient(#eee 0 25%, #fff 0 50%) 0 0 / 20px 20px; }
+    .preview img, .preview video { max-height: 170px; max-width: 100%; }
+    .card { height: 100%; display: flex; flex-direction: column; }
+    .card-content { flex-grow: 1; }
+    textarea.description { font-size: 0.85rem; }
+    .dropzone { border: 2px dashed #bbb; border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; }
+    .dropzone.is-dragging { border-color: #00d1b2; background: #f0fffc; }
+    .import-results { max-height: 200px; overflow-y: auto; font-size: 0.85rem; }
+    .users-table td { vertical-align: middle; }
+    .users-table textarea { min-width: 260px; }
+  </style>
+</head>
+<body>
+  <section class="section">
+    <div class="container">
+      <h1 class="title">Sofia Admin</h1>
+
+      <div class="tabs is-medium">
+        <ul id="pages">
+          <li data-page="stickers" class="is-active"><a>Stickers & GIFs</a></li>
+          <li data-page="users"><a>Users</a></li>
+        </ul>
+      </div>
+
+      <div id="notification"></div>
+
+      <!-- Stickers & GIFs -->
+      <div id="page-stickers">
+        <p class="subtitle is-6">Sofia only uses <strong>approved</strong> stickers. Stickers she receives wait here as <strong>pending</strong>. Descriptions are what her search matches against, so keep them accurate.</p>
+
+        <div class="box">
+          <h2 class="title is-5">Import</h2>
+          <div class="columns">
+            <div class="column is-5">
+              <div class="dropzone mb-3" id="dropzone">
+                <p><strong>Drop files here</strong> or click to choose</p>
+                <p class="is-size-7 has-text-grey">png, jpg, webp, gif, mp4, webm, mov. You can pick many at once.</p>
+                <input type="file" id="import-files" multiple class="is-hidden" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime">
+              </div>
+              <p class="is-size-7 mb-3" id="import-selected">No files chosen</p>
+              <div class="field">
+                <label class="label">Send as</label>
+                <div class="select is-fullwidth">
+                  <select id="import-kind">
+                    <option value="auto">Auto (videos as GIFs, images and .gif as stickers)</option>
+                    <option value="sticker">Sticker (png, jpg, webp, gif → 512×512 webp)</option>
+                    <option value="gif">GIF (gif or video → mp4)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="column">
+              <div class="field">
+                <label class="label">Description <span class="has-text-grey has-text-weight-normal">(optional, only used when importing one file, otherwise written automatically)</span></label>
+                <textarea class="textarea" id="import-description" rows="4" placeholder="What it shows, any text on it, and when to send it"></textarea>
+              </div>
+              <div class="buttons">
+                <button class="button is-primary" id="import-button">Import</button>
+                <button class="button is-light is-hidden" id="import-stop">Stop</button>
+              </div>
+            </div>
+          </div>
+          <div id="import-progress" class="is-hidden">
+            <progress class="progress is-primary mb-1" id="import-bar" value="0" max="1"></progress>
+            <p class="is-size-7 mb-2" id="import-status"></p>
+            <div class="import-results" id="import-results"></div>
+          </div>
+        </div>
+
+        <div class="tabs is-boxed">
+          <ul id="tabs">
+            <li data-status="pending" class="is-active"><a>Pending <span class="tag is-warning is-rounded ml-2" id="pending-count">0</span></a></li>
+            <li data-status="approved"><a>Approved</a></li>
+            <li data-status="rejected"><a>Rejected</a></li>
+            <li data-status=""><a>All</a></li>
+          </ul>
+        </div>
+
+        <div class="columns is-multiline" id="stickers"></div>
+        <p class="has-text-grey has-text-centered is-hidden" id="empty">Nothing here.</p>
+      </div>
+
+      <!-- Users -->
+      <div id="page-users" class="is-hidden">
+        <p class="subtitle is-6">People in Sofia's contact list. Only they can chat with her in private chats. The description is shown to her when they chat.</p>
+
+        <div class="box">
+          <h2 class="title is-5">Add user</h2>
+          <div class="columns">
+            <div class="column is-3"><input class="input" id="new-name" placeholder="Name"></div>
+            <div class="column is-3"><input class="input" id="new-phone" placeholder="Phone with country code, e.g. +65 9123 4567"></div>
+            <div class="column"><input class="input" id="new-description" placeholder="Description (optional), e.g. classmate, likes cats"></div>
+            <div class="column is-narrow"><button class="button is-primary" id="add-user">Add</button></div>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="table is-fullwidth is-hoverable users-table">
+            <thead><tr><th>Name</th><th>Phone / WhatsApp ID</th><th>Description</th><th>User ID</th><th></th></tr></thead>
+            <tbody id="users"></tbody>
+          </table>
+        </div>
+        <p class="has-text-grey has-text-centered is-hidden" id="users-empty">No users yet.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <template id="card-template">
+    <div class="column is-12-mobile is-6-tablet is-4-desktop is-3-widescreen">
+      <div class="card">
+        <div class="card-image preview"></div>
+        <div class="card-content p-3">
+          <div class="tags mb-2"></div>
+          <textarea class="textarea description" rows="6"></textarea>
+        </div>
+        <footer class="card-footer buttons are-small p-2 mb-0">
+          <button class="button is-success" data-action="approve">Approve</button>
+          <button class="button is-warning" data-action="reject">Reject</button>
+          <button class="button is-info is-light" data-action="save">Save</button>
+          <button class="button is-light" data-action="describe" title="Write the description again with the vision model">Re-describe</button>
+          <button class="button is-danger is-light" data-action="delete">Delete</button>
+        </footer>
+      </div>
+    </div>
+  </template>
+
+  <template id="user-template">
+    <tr>
+      <td><input class="input is-small" data-field="name"></td>
+      <td><input class="input is-small" data-field="whatsapp_jid"></td>
+      <td><textarea class="textarea is-small" rows="2" data-field="description"></textarea></td>
+      <td><code class="is-size-7" data-id></code></td>
+      <td>
+        <div class="buttons are-small is-flex-wrap-nowrap">
+          <button class="button is-info is-light" data-action="save">Save</button>
+          <button class="button is-danger is-light" data-action="delete">Delete</button>
+        </div>
+      </td>
+    </tr>
+  </template>
+
+  <script>
+    let status = 'pending';
+
+    function notify(message, type = 'is-danger') {
+      const el = document.getElementById('notification');
+      el.innerHTML = '';
+      const div = document.createElement('div');
+      div.className = `notification ${type} is-light`;
+      div.textContent = message;
+      el.appendChild(div);
+      setTimeout(() => div.remove(), 6000);
+    }
+
+    async function api(url, options = {}) {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `${res.status} ${res.statusText}`);
+      }
+      return res.status == 204 ? null : res.json();
+    }
+
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+    function tag(text, cls) {
+      const span = document.createElement('span');
+      span.className = `tag ${cls}`;
+      span.textContent = text;
+      return span;
+    }
+
+    // ---------- Pages ----------
+    document.querySelectorAll('#pages li').forEach(li => li.addEventListener('click', () => {
+      document.querySelectorAll('#pages li').forEach(l => l.classList.toggle('is-active', l == li));
+      for (const page of ['stickers', 'users']) {
+        document.getElementById(`page-${page}`).classList.toggle('is-hidden', li.dataset.page != page);
+      }
+      ({ stickers: loadStickers, users: loadUsers })[li.dataset.page]();
+    }));
+
+    // ---------- Stickers ----------
+    function renderCard(s) {
+      const node = document.getElementById('card-template').content.cloneNode(true);
+      const preview = node.querySelector('.preview');
+      const fileUrl = `/api/stickers/${s.id}/file`;
+      if (s.mime.startsWith('video/')) {
+        preview.appendChild(Object.assign(document.createElement('video'), { src: fileUrl, autoplay: true, loop: true, muted: true, playsInline: true }));
+      }
+      else {
+        preview.appendChild(Object.assign(document.createElement('img'), { src: fileUrl, alt: s.description, loading: 'lazy' }));
+      }
+      node.querySelector('.tags').append(
+        tag(s.id, 'is-dark'),
+        tag(s.kind == 'gif' ? 'GIF' : 'Sticker', 'is-link is-light'),
+        ...(s.animated && s.kind == 'sticker' ? [tag('animated', 'is-info is-light')] : []),
+        tag(s.status, { pending: 'is-warning', approved: 'is-success', rejected: 'is-danger' }[s.status] + ' is-light'),
+        tag(s.source == 'received' ? `from ${(s.receivedFrom || 'unknown').split('@')[0]}` : 'uploaded', 'is-light'),
+      );
+      const description = node.querySelector('.description');
+      description.value = s.description;
+      node.querySelector('[data-action="approve"]').classList.toggle('is-hidden', s.status == 'approved');
+      node.querySelector('[data-action="reject"]').classList.toggle('is-hidden', s.status == 'rejected');
+
+      node.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', async () => {
+        const action = button.dataset.action;
+        if (action == 'delete' && !confirm(`Delete ${s.id}? This can't be undone.`)) return;
+        button.classList.add('is-loading');
+        try {
+          if (action == 'approve' || action == 'reject') {
+            await api(`/api/stickers/${s.id}`, json('PATCH', { status: action == 'approve' ? 'approved' : 'rejected', description: description.value }));
+          }
+          else if (action == 'save') {
+            await api(`/api/stickers/${s.id}`, json('PATCH', { description: description.value }));
+            notify(`Saved ${s.id}`, 'is-success');
+          }
+          else if (action == 'describe') {
+            description.value = (await api(`/api/stickers/${s.id}/describe`, { method: 'POST' })).description;
+          }
+          else if (action == 'delete') {
+            await api(`/api/stickers/${s.id}`, { method: 'DELETE' });
+          }
+          if (action != 'save' && action != 'describe') await loadStickers();
+        }
+        catch (e) {
+          notify(`${action} failed: ${e.message}`);
+        }
+        finally {
+          button.classList.remove('is-loading');
+        }
+      }));
+      return node;
+    }
+
+    async function loadStickers() {
+      try {
+        const [stickers, pending] = await Promise.all([
+          api(`/api/stickers${status ? `?status=${status}` : ''}`),
+          status == 'pending' ? null : api('/api/stickers?status=pending'),
+        ]);
+        document.getElementById('pending-count').textContent = (pending ?? stickers).length;
+        document.getElementById('stickers').replaceChildren(...stickers.map(renderCard));
+        document.getElementById('empty').classList.toggle('is-hidden', stickers.length > 0);
+      }
+      catch (e) {
+        notify(`Couldn't load stickers: ${e.message}`);
+      }
+    }
+
+    function showStatus(newStatus) {
+      status = newStatus;
+      document.querySelectorAll('#tabs li').forEach(l => l.classList.toggle('is-active', l.dataset.status == status));
+      loadStickers();
+    }
+    document.querySelectorAll('#tabs li').forEach(li => li.addEventListener('click', () => showStatus(li.dataset.status)));
+
+    // ---------- Import ----------
+    let files = [];
+    let stopRequested = false;
+    const fileInput = document.getElementById('import-files');
+    const dropzone = document.getElementById('dropzone');
+
+    function chooseFiles(list) {
+      files = [...list];
+      document.getElementById('import-selected').textContent = files.length
+        ? `${files.length} file${files.length == 1 ? '' : 's'} chosen${files.length == 1 ? `: ${files[0].name}` : ''}`
+        : 'No files chosen';
+    }
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => chooseFiles(fileInput.files));
+    dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('is-dragging'); });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('is-dragging'));
+    dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('is-dragging'); chooseFiles(e.dataTransfer.files); });
+
+    function kindFor(file) {
+      const chosen = document.getElementById('import-kind').value;
+      if (chosen != 'auto') return chosen;
+      return file.type.startsWith('video/') ? 'gif' : 'sticker';
+    }
+
+    function addResult(file, text, cls) {
+      const p = document.createElement('p');
+      p.append(tag(text, cls), ` ${file.name}`);
+      document.getElementById('import-results').prepend(p);
+    }
+
+    document.getElementById('import-stop').addEventListener('click', () => {
+      stopRequested = true;
+      document.getElementById('import-status').textContent = 'Stopping after the files already uploading…';
+    });
+
+    document.getElementById('import-button').addEventListener('click', async () => {
+      if (!files.length) return notify('Choose some files first');
+      const queue = [...files];
+      const total = queue.length;
+      const description = total == 1 ? document.getElementById('import-description').value.trim() : '';
+      const bar = document.getElementById('import-bar');
+      const statusText = document.getElementById('import-status');
+      const importButton = document.getElementById('import-button');
+      const stopButton = document.getElementById('import-stop');
+      const counts = { uploaded: 0, duplicate: 0, failed: 0 };
+      let done = 0;
+      stopRequested = false;
+      bar.max = total;
+      bar.value = 0;
+      document.getElementById('import-results').replaceChildren();
+      document.getElementById('import-progress').classList.remove('is-hidden');
+      importButton.classList.add('is-loading');
+      stopButton.classList.remove('is-hidden');
+
+      const update = (current) => {
+        bar.value = done;
+        statusText.textContent = `${done} / ${total} done` + (current ? ` · uploading ${current}` : '') +
+          ` · ${counts.uploaded} uploaded, ${counts.duplicate} already saved, ${counts.failed} failed`;
+      };
+      // Two at a time: each upload waits for the vision model to write a description
+      const worker = async () => {
+        while (queue.length && !stopRequested) {
+          const file = queue.shift();
+          update(file.name);
+          try {
+            const params = new URLSearchParams({ kind: kindFor(file) });
+            if (description) params.set('description', description);
+            const added = await api(`/api/stickers?${params}`, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+            if (added.duplicate) { counts.duplicate++; addResult(file, `already saved as ${added.id}`, 'is-warning is-light'); }
+            else { counts.uploaded++; addResult(file, added.id, 'is-success is-light'); }
+          }
+          catch (e) {
+            counts.failed++;
+            addResult(file, `failed: ${e.message}`, 'is-danger is-light');
+          }
+          done++;
+          update();
+        }
+      };
+      await Promise.all([worker(), worker()]);
+
+      importButton.classList.remove('is-loading');
+      stopButton.classList.add('is-hidden');
+      statusText.textContent = `${stopRequested ? 'Stopped' : 'Finished'}: ${counts.uploaded} uploaded, ${counts.duplicate} already saved, ${counts.failed} failed` +
+        (stopRequested && queue.length ? `, ${queue.length} not started` : '') + '.';
+      notify(statusText.textContent, counts.failed ? 'is-warning' : 'is-success');
+      fileInput.value = '';
+      chooseFiles([]);
+      document.getElementById('import-description').value = '';
+      showStatus('approved'); // Uploads are approved straight away
+    });
+
+    // ---------- Users ----------
+    function renderUser(u) {
+      const row = document.getElementById('user-template').content.cloneNode(true);
+      row.querySelectorAll('[data-field]').forEach(input => input.value = u[input.dataset.field] ?? '');
+      row.querySelector('[data-id]').textContent = u.id;
+      const tr = row.querySelector('tr');
+      tr.querySelector('[data-action="save"]').addEventListener('click', async (e) => {
+        const button = e.currentTarget;
+        button.classList.add('is-loading');
+        try {
+          const body = Object.fromEntries([...tr.querySelectorAll('[data-field]')].map(i => [i.dataset.field, i.value]));
+          const saved = await api(`/api/users/${u.id}`, json('PATCH', body));
+          tr.querySelector('[data-field="whatsapp_jid"]').value = saved.whatsapp_jid;
+          notify(`Saved ${saved.name}`, 'is-success');
+        }
+        catch (err) {
+          notify(`Couldn't save ${u.name}: ${err.message}`);
+        }
+        finally {
+          button.classList.remove('is-loading');
+        }
+      });
+      tr.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+        if (!confirm(`Delete ${u.name}? Sofia won't be able to chat with them in private chats any more. Their memories and scheduled tasks are kept but will point to a user that no longer exists.`)) return;
+        try {
+          await api(`/api/users/${u.id}`, { method: 'DELETE' });
+          notify(`Deleted ${u.name}`, 'is-success');
+          await loadUsers();
+        }
+        catch (err) {
+          notify(`Couldn't delete ${u.name}: ${err.message}`);
+        }
+      });
+      return row;
+    }
+
+    async function loadUsers() {
+      try {
+        const users = await api('/api/users');
+        document.getElementById('users').replaceChildren(...users.map(renderUser));
+        document.getElementById('users-empty').classList.toggle('is-hidden', users.length > 0);
+      }
+      catch (e) {
+        notify(`Couldn't load users: ${e.message}`);
+      }
+    }
+
+    document.getElementById('add-user').addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+      const fields = { name: 'new-name', whatsapp_jid: 'new-phone', description: 'new-description' };
+      const body = Object.fromEntries(Object.entries(fields).map(([k, id]) => [k, document.getElementById(id).value]));
+      button.classList.add('is-loading');
+      try {
+        const added = await api('/api/users', json('POST', body));
+        notify(`Added ${added.name} (${added.whatsapp_jid})`, 'is-success');
+        Object.values(fields).forEach(id => document.getElementById(id).value = '');
+        await loadUsers();
+      }
+      catch (err) {
+        notify(`Couldn't add user: ${err.message}`);
+      }
+      finally {
+        button.classList.remove('is-loading');
+      }
+    });
+
+    loadStickers();
+  </script>
+</body>
+</html>
