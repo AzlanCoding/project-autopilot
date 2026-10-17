@@ -41,7 +41,22 @@ const main = async () => {
         return;
       }
       await db.ai_scheduled_task_runner!(
-        async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class.`
+        async () => `Please use send your daily 7am morning message with today's timetable "${data}" to the "IT2504 PEM & PCS" group chat. You might need to get the group chat id by using the list_groups tool. Using the group chat ID you will be able to send the message to that group chat ID. Do not end your message with any questions to the class.
+        For the following subjects, student's are split into 3 different specialization with the following subjects:
+        Applied AI & Operations
+        - IT2122: APPLIED DEEP LEARNING
+        - IT2123: APPLIED MACHINE LEARNING
+        - IT2124: MACHINE LEARNING OPERATIONS
+        DevOps & Automation in the Cloud
+        - IT2125: CLOUD ARCHITECTURE
+        - IT2126: CLOUD DEVELOPMENT
+        - IT2127: CLOUD OPERATIONS
+        Applied AI & Operations
+        - IT2128: APPLICATION SECURITY
+        - IT2129: CYBERSECURITY ATTACK & DEFENCE
+        - IT2130: CYBER FORENSIC TECHNOLOGIES & PROCESS
+        Start with the modules that everyone has to take (such as responsible AI for sustainability), and then group by the specialization.
+        Send the whole thing as 1 message.`
       );
 
       logger.info(`Daily Message Job Finished executed`);
