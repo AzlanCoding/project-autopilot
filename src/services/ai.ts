@@ -22,7 +22,7 @@ import type { PreProccessChatMsg } from './botService';
 import type { Sticker } from '../models/Sticker';
 import { ModelImage, toModelImage } from '../utils/media';
 import { chatContext } from './chatContext';
-import { aboutToActProbability, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
+import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
@@ -1614,7 +1614,7 @@ ${await message()}`,
           catch (e) {
             instance.logger.error(e, 'Unfinished reply check failed');
           }
-          instance.logger.info({ aboutToAct: p, ending: responseText.trim().slice(-200) }, 'Unfinished reply check');
+          instance.logger.info({ aboutToAct: p, ending: replyEnding(responseText) }, 'Unfinished reply check');
           if (p >= UNFINISHED_THRESHOLD) {
             nudged = true;
             chatHistory.push({ role: 'system', content: UNFINISHED_NUDGE, type: 'message' } as EasyInputMessage);

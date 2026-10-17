@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import pino from 'pino';
 import { z } from 'zod';
 import AI from '../src/services/ai';
-import { UNFINISHED_NUDGE } from '../src/services/unfinishedReply';
+import { replyEnding, UNFINISHED_NUDGE } from '../src/services/unfinishedReply';
 
 /** Builds an AI instance with a fake Responses API that streams `turns` (one list of output items per request). */
 function fakeAI(turns: any[][], extraTools: any[] = []) {
@@ -186,4 +186,12 @@ test('Sofia is only nudged once per reply, and a failing check does not break th
 test('a reply ended by a tool is not checked', async () => {
   const { ai } = fakeAI([[message('Anytime!\n\n'), call('end_message', {})]], [fakeTool('end_message', [], 'Reply ended.')]);
   assert.deepEqual(await runLogged(ai, [0.9]), ['sent: Anytime!', 'tool: end_message']);
+});
+
+test('the unfinished check only looks at the last message of a reply', () => {
+  // The whole 10 message reply on 17 Oct scored 0.77 "about to act" because of its middle, its ending is an offer
+  assert.equal(replyEnding("Here's your prompt 👇\n\n```\nSend the daily 7am message...\n```\n\nWant me to fire one more dry run at the Testing Group Chat?\n"),
+    'Want me to fire one more dry run at the Testing Group Chat?');
+  assert.equal(replyEnding("Here's what I'm sending\n\n  \n\nGoing in now! 🚀"), 'Going in now! 🚀');
+  assert.equal(replyEnding('Single message'), 'Single message');
 });

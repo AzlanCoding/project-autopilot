@@ -62,7 +62,7 @@ It matches a known Qwen3 issue with thinking mode, [QwenLM/Qwen3#1817](https://g
 where the reporter describes the model planning the tool call in its reasoning, then responding as if it had been made. Sofia's reasoning when she ghosted read: *"I'm planning to test the new multi-message format by sending three bite-sized messages to the Testing Group Chat, then I'll show Azlan what I'm sending and confirm once it goes through."*
 
 Workarounds (`src/services/unfinishedReply.ts`):
-*   When a reply ends with text and no tool call, the decision model checks how it ends. If it says she is about to act (score of 0.3 or more), she is told to make the tool call or call `end_message`, and gets one more turn. Only one nudge per reply. Every check is logged as `Unfinished reply check` with its score, so the threshold can be tuned.
+*   When a reply ends with text and no tool call, the decision model checks how it ends (only its last message: judging the whole reply let earlier parts outweigh the ending, so an offer like "Want me to fire one more dry run…?" was flagged and Sofia did the dry run without being asked). If it says she is about to act (score of 0.3 or more), she is told to make the tool call, or to call `end_message` if she asked a question or made an offer and is waiting for the user, and gets one more turn. Only one nudge per reply. Every check is logged as `Unfinished reply check` with its score and the ending it judged, so the threshold can be tuned.
 *   The prompt tells her to make the tool call in the same response as announcing it, and `send_message` no longer asks her to show the message *before* calling it.
 
 ## TODO
