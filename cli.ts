@@ -60,6 +60,18 @@ class MockChatAdapter implements ChatAdapter {
     await this.record(id, 'AI', `<WhatsApp ${sticker.kind == 'gif' ? 'GIF' : 'Sticker'}>`);
   }
 
+  async sendPoll(id: string, poll: { question: string, options: string[], multiple: boolean }) {
+    const name = id.endsWith('@g.us') ? this.groups.find(g => g.id == id)?.name : (await this.db.user.findById(id))?.name ?? id;
+    console.log(`\n📊 [poll -> ${name} (${id})] ${poll.question} (${poll.multiple ? 'pick any' : 'pick one'}): ${poll.options.join(' | ')}\n`);
+    const pollId = `mock-poll-${Math.random().toString(36).slice(2, 8)}`;
+    await this.record(id, 'AI', `<WhatsApp Poll poll_id=${pollId}> "${poll.question}" Options: ${poll.options.join(' | ')}`);
+    return pollId;
+  }
+
+  async getPollResults(): Promise<null> {
+    return null; // Nobody votes in the CLI test harness
+  }
+
   async getMedia(mediaId: string): Promise<ChatMedia> {
     throw Error(`Media is not available in the CLI test harness (media_id ${mediaId}).`);
   }

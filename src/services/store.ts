@@ -19,6 +19,8 @@ import { ScheduledTask } from '../models/ScheduledTask';
 import { MODELSTUDIO_BASE_URL } from '../config/modelStudio';
 import { Sticker } from '../models/Sticker';
 import { StickerService } from './stickerService';
+import { Poll, PollVote } from '../models/Poll';
+import { PollService } from './pollService';
 
 // Shown to the AI after a memory_write so it can clean up overlapping memories.
 const SIMILAR_MEMORY_TOP_K = 5;
@@ -35,6 +37,7 @@ export default class Store {
   scheduledTask: ScheduledTaskService;
   user: UserService;
   stickers: StickerService;
+  polls: PollService;
   private logger: Logger;
 
   ai_scheduled_task_runner?: (message: () => Promise<string>, modelOptions?: Partial<ResponseCreateParamsStreaming>, options?: ScheduledTaskRunOptions) => Promise<void>
@@ -55,6 +58,7 @@ export default class Store {
     this.scheduledTask = new ScheduledTaskService(this, this.logger);
     this.user = new UserService(this);
     this.stickers = new StickerService(this, this.logger);
+    this.polls = new PollService(this, this.logger);
   }
 
   async init() {
@@ -67,6 +71,8 @@ export default class Store {
     const ToolCallHistModel = ToolCallHist.register(this.db);
     const ScheduledTaskModel = ScheduledTask.register(this.db);
     const StickerModel = Sticker.register(this.db);
+    const PollModel = Poll.register(this.db);
+    const PollVoteModel = PollVote.register(this.db);
 
     // Optionally ensure they are available on sequelize.models with the same keys you expect
     this.db.models.AssignmentStore = AssignmentModel;
@@ -75,6 +81,8 @@ export default class Store {
     this.db.models.ToolCallHistStore = ToolCallHistModel;
     this.db.models.ScheduledTaskStore = ScheduledTaskModel;
     this.db.models.StickerStore = StickerModel;
+    this.db.models.PollStore = PollModel;
+    this.db.models.PollVoteStore = PollVoteModel;
 
     // this.assignment = AssignmentModel as any; // Quick Fix
     // this.assessment = AssessmentModel as any; // Quic Fix
@@ -87,6 +95,8 @@ export default class Store {
     await ToolCallHistModel.sync({ alter: true });
     await ScheduledTaskModel.sync({ alter: true });
     await StickerModel.sync({ alter: true });
+    await PollModel.sync({ alter: true });
+    await PollVoteModel.sync({ alter: true });
 
     this.assignment = new AssignmentService(this, this.logger);
     await this.assignment.initService();

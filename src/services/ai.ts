@@ -20,6 +20,7 @@ import { User } from '../models/User';
 import { ScheduledTask } from '../models/ScheduledTask';
 import type { PreProccessChatMsg } from './botService';
 import type { Sticker } from '../models/Sticker';
+import type { PollResults } from './pollService';
 import { ModelImage, toModelImage } from '../utils/media';
 import { chatContext } from './chatContext';
 import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
@@ -51,6 +52,10 @@ export interface ChatAdapter {
   sendStickerGif(id: string, sticker: Sticker): Promise<void>;
   /** Download an image, sticker, GIF or video by the media id shown in the chat history. */
   getMedia(mediaId: string): Promise<ChatMedia>;
+  /** Send a poll to a user id, group id (ending with `@g.us`) or WhatsApp jid, returns its poll id. */
+  sendPoll(id: string, poll: { question: string, options: string[], multiple: boolean }): Promise<string>;
+  /** The current votes of a poll by the poll id shown in the chat history, or null if the poll isn't known. */
+  getPollResults(pollId: string): Promise<PollResults | null>;
   listGroups(): Promise<{ id: string, name: string }[]>;
   /** Load the chat history with a user id or group id, oldest first. */
   loadChatById(id: string): Promise<PreProccessChatMsg[]>;
@@ -133,8 +138,9 @@ export default class AI {
   // Chat platform specific tools will be added later on runtime by registerChatTools()
   sendMessageTool?: ExtendedDynamicStructuredTool;
   sendStickerGifTool?: ExtendedDynamicStructuredTool;
-  sendStickerGifToChatTool?: ExtendedDynamicStructuredTool;
   viewMediaTool?: ExtendedDynamicStructuredTool;
+  sendPollTool?: ExtendedDynamicStructuredTool;
+  readPollTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
   chatAdapter?: ChatAdapter;
@@ -809,36 +815,22 @@ ${await message()}`,
 
     this.sendStickerGifTool = new ExtendedDynamicStructuredTool({
       name: "send_sticker_gif",
-      description: "Send a sticker or GIF (by id from `search_sticker_gif`) to the chat you are replying in.",
+      description: "Send a sticker or GIF (by id from `search_sticker_gif`), to the chat you are replying in or to another chat.",
       schema: z.object({
         sticker_id: z.string().describe("[Required] The sticker or GIF id, e.g. `stk_1a2b3c4d`."),
+        id: z.string().optional().describe("User id or group id (ending with `@g.us`) to send it to. Leave it out to send it to the chat you are replying in."),
         end_message: endMessageField,
       }),
       func: async (args) => {
-        const { sticker_id } = args as any;
-        const chat = chatContext.getStore();
-        if (!chat) {
-          throw Error("You are not replying in a chat right now, use `send_sticker_gif_to_chat` instead.");
+        const { sticker_id, id } = args as any;
+        const chatId = id ?? chatContext.getStore()?.chatId;
+        if (!chatId) {
+          throw Error("You are not replying in a chat right now, give the user id or group id to send it to.");
         }
-        await adapter.sendStickerGif(chat.chatId, await findSticker(sticker_id));
+        await adapter.sendStickerGif(chatId, await findSticker(sticker_id));
         return "Sent";
       }
-    }, "{sticker_id: string, end_message: boolean}");
-
-    this.sendStickerGifToChatTool = new ExtendedDynamicStructuredTool({
-      name: "send_sticker_gif_to_chat",
-      description: "Send a sticker or GIF (by id from `search_sticker_gif`) to another chat or group chat by user id or group id (ending with `@g.us`).",
-      schema: z.object({
-        id: z.string().describe("[Required] The user id or group id to send it to."),
-        sticker_id: z.string().describe("[Required] The sticker or GIF id, e.g. `stk_1a2b3c4d`."),
-        end_message: endMessageField,
-      }),
-      func: async (args) => {
-        const { id, sticker_id } = args as any;
-        await adapter.sendStickerGif(id, await findSticker(sticker_id));
-        return "Sent";
-      }
-    }, "{id: string, sticker_id: string, end_message: boolean}");
+    }, "{sticker_id: string, id?: string, end_message: boolean}");
 
     this.viewMediaTool = new ExtendedDynamicStructuredTool({
       name: "view_media",
@@ -899,7 +891,54 @@ ${await message()}`,
       }
     }, "{id: string, limit?: number}");
 
-    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool, this.sendStickerGifTool, this.sendStickerGifToChatTool, this.viewMediaTool);
+    this.sendPollTool = new ExtendedDynamicStructuredTool({
+      name: "send_poll",
+      description: "Send a WhatsApp poll, to the chat you are replying in or to another chat. Use it when you want people to vote (e.g. picking a date or a lunch spot), then check the votes later with `read_poll`.",
+      schema: z.object({
+        question: z.string().min(1).max(255).describe("[Required] The poll question."),
+        options: z.array(z.string().min(1).max(100)).min(2).max(12).describe("[Required] 2 to 12 different options."),
+        allow_multiple_answers: z.boolean().describe("[Required] true lets people pick several options, false only one."),
+        id: z.string().optional().describe("User id or group id (ending with `@g.us`) to send it to. Leave it out to send it to the chat you are replying in."),
+        end_message: endMessageField,
+      }),
+      func: async (args) => {
+        const { question, options, allow_multiple_answers, id } = args as any;
+        const unique = [...new Set((options as string[]).map(o => o.trim()))];
+        if (unique.length != options.length) {
+          throw Error("Poll options must all be different.");
+        }
+        const chatId = id ?? chatContext.getStore()?.chatId;
+        if (!chatId) {
+          throw Error("You are not replying in a chat right now, give the user id or group id to send the poll to.");
+        }
+        const pollId = await adapter.sendPoll(chatId, { question: question.trim(), options: unique, multiple: allow_multiple_answers });
+        return `Poll sent, poll_id=${pollId}. Use read_poll with it to see the votes.`;
+      }
+    }, "{question: string, options: string[], allow_multiple_answers: boolean, id?: string, end_message: boolean}");
+
+    this.readPollTool = new ExtendedDynamicStructuredTool({
+      name: "read_poll",
+      description: "Read the current votes of a WhatsApp poll by its `poll_id` (shown like `<WhatsApp Poll poll_id=...>` in the chat history, or returned by `send_poll`). Shows who voted for each option.",
+      schema: z.object({
+        poll_id: z.string().describe("[Required] The poll_id."),
+      }),
+      func: async (args) => {
+        const { poll_id } = args as any;
+        const results = await adapter.getPollResults(poll_id);
+        if (!results) {
+          throw Error(`Unknown poll "${poll_id}". Only polls sent or seen since polls were added can be read.`);
+        }
+        return JSON.stringify({
+          question: results.poll.question,
+          type: results.poll.multiple ? 'pick any number' : 'pick one',
+          voters: results.voters.length,
+          options: results.options.map(o => ({ option: o.option, votes: o.voters.length, voters: o.voters })),
+          note: "Only votes cast after the poll was saved are counted. People who haven't voted aren't listed.",
+        });
+      }
+    }, "{poll_id: string}");
+
+    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.sendPollTool, this.readPollTool);
     this.bindModel();
   }
 

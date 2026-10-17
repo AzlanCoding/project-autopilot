@@ -113,9 +113,9 @@ test('end_message only takes effect after the last tool call of the turn', async
 
 test('end_message: false keeps the reply going, and a failed send does not end it', async () => {
   const calls: string[] = [];
-  const failing = { name: 'send_sticker_gif_to_chat', description: 'x', schema: z.object({}).passthrough(), usage_str: '{}', invoke: async () => { throw Error('Unknown sticker'); } };
+  const failing = { name: 'send_poll', description: 'x', schema: z.object({}).passthrough(), usage_str: '{}', invoke: async () => { throw Error('Unknown sticker'); } };
   const { ai, requests } = fakeAI([
-    [call('send_sticker_gif', { sticker_id: 'stk_1', end_message: false }), call('send_sticker_gif_to_chat', { id: 'x', sticker_id: 'bad', end_message: true })],
+    [call('send_sticker_gif', { sticker_id: 'stk_1', end_message: false }), call('send_poll', { question: 'bad', options: [], end_message: true })],
     [message('Sorry, that sticker is gone')],
   ], [fakeTool('send_sticker_gif', calls), failing]);
   assert.deepEqual(await run(ai), ['Sorry, that sticker is gone']);

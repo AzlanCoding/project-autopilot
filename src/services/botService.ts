@@ -1,6 +1,6 @@
 import P from "pino";
 import { Boom } from '@hapi/boom';
-import makeWASocket, { downloadMediaMessage, fetchLatestBaileysVersion, AuthenticationState, CacheStore, DisconnectReason, generateMessageIDV2, isJidNewsletter, proto, getAggregateVotesInPollMessage, BaileysEventEmitter, WAMessage, jidNormalizedUser } from 'baileys';
+import makeWASocket, { downloadMediaMessage, fetchLatestBaileysVersion, AuthenticationState, CacheStore, DisconnectReason, generateMessageIDV2, isJidNewsletter, proto, getAggregateVotesInPollMessage, BaileysEventEmitter, WAMessage, WAMessageKey, jidNormalizedUser } from 'baileys';
 import BaileysBottle from 'baileys-bottle-devstroupe';
 import NodeCache from '@cacheable/node-cache';
 import qrcode from 'qrcode-terminal';
@@ -15,6 +15,7 @@ import { chatContext } from './chatContext';
 import { toUnixSeconds } from '../utils/common';
 import { VIDEO_ENABLED } from '../config/media';
 import type { Sticker } from '../models/Sticker';
+import type { PollResults } from './pollService';
 import { EasyInputMessage, ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
 
@@ -24,7 +25,15 @@ const BOTTLE_STORE_NAME = 'sofia';
  * Text shown to Sofia for a message. Media get a `media_id` (the WhatsApp message id) she can pass to `view_media`,
  * e.g. `<WhatsApp Image media_id=3EB0...> caption`. Returns undefined for messages without text or supported media.
  */
+/** The poll in a message, if it is one (WhatsApp has three versions of poll messages). */
+export const pollOf = (m?: proto.IMessage | null) => m?.pollCreationMessage || m?.pollCreationMessageV2 || m?.pollCreationMessageV3;
+
 export function describeContent(m: proto.IMessage, id?: string | null, { videos = VIDEO_ENABLED } = {}): string | undefined {
+  const poll = pollOf(m);
+  if (poll) {
+    const options = (poll.options ?? []).map(o => o.optionName).join(' | ');
+    return `<WhatsApp Poll${id ? ` poll_id=${id}` : ''} (${poll.selectableOptionsCount == 1 ? 'pick one' : 'pick any number'})> "${poll.name}" Options: ${options}`;
+  }
   const mediaId = id ? ` media_id=${id}` : '';
   const caption = (c?: string | null) => c ? ` ${c}` : '';
   if (m.stickerMessage) {
@@ -239,9 +248,14 @@ export class SofiaBot implements ChatAdapter {
           const upsert = events['messages.upsert'];
           this.logger.debug(upsert, 'messages.upsert fired');
 
+          // Polls (sent or received) are saved so their votes can be read, votes are decrypted and saved
+          for (const msg of upsert.messages) {
+            this.handlePollMessage(msg).catch(e => this.logger.error(e, 'Failed to handle poll message'));
+          }
+
           if (upsert.type === 'notify') {
             for (const msg of upsert.messages) {
-              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage);
+              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage || pollOf(msg.message));
               if (!msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
                 // Received stickers and GIFs are saved as pending until approved in the web UI
                 this.saveReceivedStickerGif(msg).catch(e => this.logger.error(e, 'Failed to save received sticker/GIF'));
@@ -650,6 +664,75 @@ export class SofiaBot implements ChatAdapter {
   /**
    * Sends a text message to a user id or group id (ending with `@g.us`).
    */
+  /** Sofia's own jids (phone number and lid), normalised. */
+  private ownJids() {
+    return [this.sock?.user?.id, this.sock?.user?.lid].filter((j): j is string => !!j).map(j => jidNormalizedUser(j));
+  }
+
+  /** The jids the author of a message may be known by, phone number jid first (like Baileys' getKeyAuthor). */
+  private authorJids(key: WAMessageKey) {
+    if (key.fromMe) {
+      return this.ownJids();
+    }
+    const jids = key.remoteJid?.endsWith('@g.us') ? [key.participantAlt, key.participant] : [key.remoteJidAlt, key.remoteJid];
+    return [...new Set(jids.filter((j): j is string => !!j).map(j => jidNormalizedUser(j)))];
+  }
+
+  /** Saves polls so their votes can be read, and decrypts and saves votes. */
+  private async handlePollMessage(msg: WAMessage) {
+    const poll = pollOf(msg.message);
+    if (poll && msg.key.id && msg.key.remoteJid) {
+      const secret = msg.message?.messageContextInfo?.messageSecret;
+      if (!secret) {
+        this.logger.warn(`Poll ${msg.key.id} has no message secret, its votes can't be read`);
+        return;
+      }
+      await this.db.polls.save({
+        id: msg.key.id,
+        chat: msg.key.remoteJid,
+        from_me: !!msg.key.fromMe,
+        creator_jids: this.authorJids(msg.key),
+        question: poll.name ?? '',
+        options: (poll.options ?? []).map(o => o.optionName ?? ''),
+        multiple: poll.selectableOptionsCount != 1,
+        secret: Buffer.from(secret).toString('base64'),
+      });
+    }
+    const update = msg.message?.pollUpdateMessage;
+    if (update?.vote && update.pollCreationMessageKey?.id) {
+      const votedAt = new Date(Number(update.senderTimestampMs ?? 0) || toUnixSeconds(msg.messageTimestamp) * 1000);
+      const selected = await this.db.polls.recordVote(update.pollCreationMessageKey.id, update.vote, this.authorJids(msg.key), votedAt);
+      if (selected) {
+        this.logger.info(`Poll vote for ${update.pollCreationMessageKey.id}: ${selected.join(', ') || '(vote removed)'}`);
+      }
+    }
+  }
+
+  public async sendPoll(id: string, poll: { question: string, options: string[], multiple: boolean }): Promise<string> {
+    if (!this.sock) {
+      throw Error("Bot is not connected.");
+    }
+    const sent = await this.sock.sendMessage(await this.resolveJid(id), { poll: { name: poll.question, values: poll.options, selectableCount: poll.multiple ? 0 : 1 } });
+    if (!sent?.key.id) {
+      throw Error("The poll wasn't sent.");
+    }
+    // Also saved when WhatsApp echoes it back, saving here means votes can be read straight away
+    await this.handlePollMessage(sent);
+    return sent.key.id;
+  }
+
+  public async getPollResults(pollId: string): Promise<PollResults | null> {
+    const own = this.ownJids();
+    return this.db.polls.results(pollId, async (jid) => {
+      if (own.includes(jidNormalizedUser(jid))) {
+        return 'You (Sofia)';
+      }
+      const pn = jid.endsWith('@lid') ? await this.sock?.signalRepository.lidMapping.getPNForLID(jid) : jid;
+      const user = pn ? await this.db.user.getUserByJid(this.parseJid(pn)!) : null;
+      return user?.name ?? `Unknown (${(pn ?? jid).split('@')[0].slice(-4)})`;
+    });
+  }
+
   /** WhatsApp jid for a user id, group id (ending with `@g.us`) or jid. */
   private async resolveJid(id: string) {
     if (id.includes('@')) {

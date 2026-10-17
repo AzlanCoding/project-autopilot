@@ -20,6 +20,7 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Able to reply in a multi-user environment such as group chats.
 *   Automatically send messages to remind the class about upcoming assignments and assessment. Automatically send daily message which is 
 *   Able to retain a universal memory based on conversations with classmates. Related memory is included in the prompt before any conversation or scheduled task starts.
+*   Sends WhatsApp polls and reads their votes (who voted for what). See *Baileys doesn't decrypt poll votes* under Known Issues.
 *   Sofia will wait for user to finish typing for 3 seconds after a message is received before taking any action. This means that when a message is sent, Sofia should only take action after 3 seconds if no new message was sent or no typing activity was detected. This also attempts to help prevent spam. Note that typing activity detection does not affect this for group chats.
 
 
@@ -65,6 +66,16 @@ where the reporter describes the model planning the tool call in its reasoning, 
 Workarounds (`src/services/unfinishedReply.ts`):
 *   When a reply ends with text and no tool call, the decision model checks how it ends (only its last message: judging the whole reply let earlier parts outweigh the ending, so an offer like "Want me to fire one more dry run…?" was flagged and Sofia did the dry run without being asked). If it says she is about to act (score of 0.3 or more), she is told to make the tool call, or to call `end_message` if she asked a question or made an offer and is waiting for the user, and gets one more turn. Only one nudge per reply. Every check is logged as `Unfinished reply check` with its score and the ending it judged, so the threshold can be tuned.
 *   The prompt tells her to make the tool call in the same response as announcing it, and `send_message` no longer asks her to show the message *before* calling it.
+
+### Baileys doesn't decrypt poll votes
+Votes on WhatsApp polls arrive encrypted with the poll's secret key (`messageContextInfo.messageSecret`), and only name the picked options by their SHA-256 hash. In Baileys `7.0.0-rc14` (the version in `package.json`), the code that decrypts votes and emits them as `pollUpdates` in a `messages.update` event is commented out in `node_modules/baileys/lib/Utils/process-message.js` (the `content?.pollUpdateMessage` block, marked "TODO: make standalone, remove getMessage reference"). `decryptPollVote` and `getAggregateVotesInPollMessage` are still exported, but nothing calls them.
+
+Workaround (`src/services/pollService.ts`, `src/models/Poll.ts`):
+*   Every poll Sofia sends or sees is saved in `PollStore` with its question, options and secret key.
+*   Each vote (`pollUpdateMessage`) is decrypted with `decryptPollVote` in `SofiaBot.handlePollMessage`, trying each phone number and lid jid the poll's creator and the voter may be known by, and the latest vote per person is kept in `PollVoteStore`.
+*   `read_poll` reads the votes from `PollVoteStore`. Only polls sent or seen since this was added can be read.
+
+Switching back to Baileys: after upgrading Baileys, check whether that `pollUpdateMessage` block in `process-message.js` is active again. If it is, give `makeWASocket` a `getMessage` that returns the poll message from the store (Baileys needs it to find the poll's secret key), and Baileys will emit `messages.update` events with `pollUpdates`. Then `read_poll` can use `getAggregateVotesInPollMessage` on the poll message, and `handlePollMessage`, `PollVoteStore` and most of `PollService` can be removed. Check that votes still decrypt for people with lid jids before removing the workaround.
 
 ## TODO
 *   ~~Add Tool Calls to chat history~~
