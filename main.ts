@@ -53,14 +53,14 @@ Structure the message exactly like this:
 
 1. Opening line: greeting + weekday + date + Semester and Week number.
 2. Then these three sections, in this order, one for each section of the timetable. Each section lists every class for that track, including the modules the whole class takes (e.g. IT2121 Responsible AI for Sustainability, IT2134 IT Innovation Project, IT-DIT PEM contact time):
-*🤖 Applied AI & Operations* — IT2122 Applied Deep Learning, IT2123 Applied Machine Learning, IT2124 Machine Learning Operations
-*☁️ DevOps & Automation in the Cloud* — IT2125 Cloud Architecture, IT2126 Cloud Development, IT2127 Cloud Operations
-*🔐 Cybersecurity* — IT2128 Application Security, IT2129 Cybersecurity Attack & Defence, IT2130 Cyber Forensic Technologies & Process
+*🤖 Applied AI & Operations*
+*☁️ DevOps & Automation in the Cloud*
+*🔐 Cybersecurity*
 3. Under each heading, one bullet per timetable block, in time order, then any (ELEARN) blocks at the end of the section, keeping every detail from the timetable:
-- 09:00 - 11:50 · IT2122 Applied Deep Learning · LAB02 · Room L.532
+- *09:00 - 11:50* · IT2122 Applied Deep Learning · LAB02 · Room L.532
+- <Any Additional Info if given>
 4. Blocks marked (ELEARN) have no time. Write them like this, and never give them a time:
 - IT2121 Responsible AI for Sustainability · LEC01 · e-learning
-E-learning is own pace, own target, for everybody.
 5. If a section has no blocks today, write exactly:
 - No lessons for today
 Never say "no on-campus lesson" — there may still be e-learning.
