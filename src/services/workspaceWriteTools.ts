@@ -130,7 +130,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const driveManage = new ExtendedDynamicStructuredTool({
     name: 'drive_manage',
-    description: 'Create, copy, move, rename, trash or convert files in Google Drive. New files go in the GDG shared drive unless a folder is given. "trash" moves a file to the trash (it can be restored for 30 days): confirm with the person first. "convert" makes a Google Doc/Sheet/Slides copy of a .docx/.xlsx/.pptx file next to it (the original stays), so it can be edited.',
+    description: 'Create, copy, move, rename, trash or convert files in Google Drive. New files go in the GDG shared drive unless a folder is given. "trash" moves a file to the trash (it can be restored for 30 days): confirm with the person first. "convert" makes a Google Doc/Sheet/Slides copy of a .docx/.xlsx/.pptx file (next to it, or in folder with name), so it can be edited; it copies and converts in one step, so don\'t copy the Office file first. The original stays as it is.',
     schema: z.object({
       action: z.enum(['create', 'copy', 'move', 'rename', 'trash', 'convert']).describe('[Required]'),
       url: z.string().optional().describe('[copy, move, rename, trash, convert] The file\'s link or id.'),
@@ -364,6 +364,8 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
         if (a.after_text) {
           const found = findDocText(tab.body, a.after_text);
           if (!found) throw Error(`"${a.after_text}" wasn't found in tab "${tab.title}".`);
+          // "Label:" then a chip reads better with a space between
+          if (a.action == 'insert_inline' && /[^\s(\[/]$/.test(a.after_text) && a.text && !/^[\s.,;:!?)]/.test(a.text)) a.text = ` ${a.text}`;
           return found.end;
         }
         if (a.table) {
@@ -521,6 +523,11 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           await ws.call(() => values.update({ spreadsheetId, range: `'${a.tab.replace(/'/g, "''")}'!A1`, valueInputOption: 'USER_ENTERED', requestBody: { values: a.values } }));
         }
         return `Added tab "${a.tab}" (id ${sheetId}) to "${file.name}". ${file.webViewLink}#gid=${sheetId}`;
+      }
+      // With several tabs, writing to "the first tab" by default is how template pages get overwritten by mistake
+      const tabs = spreadsheet.sheets ?? [];
+      if (tabs.length > 1 && !a.tab && file.ref.gid == null) {
+        throw Error(`"${file.name}" has ${tabs.length} tabs: ${tabs.map(t => `"${t.properties?.title}"`).join(', ')}. Say which one with tab.`);
       }
       const sheet = ws.pickSheet(spreadsheet, a.tab, file.ref.gid);
       const title = sheet.properties!.title!;

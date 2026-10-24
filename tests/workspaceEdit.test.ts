@@ -103,6 +103,7 @@ function workspace(files: { [id: string]: any }, overrides: any = {}) {
       },
     },
     slides: overrides.slides,
+    sheets: overrides.sheets,
     docs: {
       documents: {
         get: async () => ({ data: { tabs: [{ tabProperties: { tabId: 't.0', title: 'Tab 1' }, documentTab: { body: { content: [{ startIndex: 0, endIndex: 1, sectionBreak: {} }, { startIndex: 1, endIndex: 7, paragraph: { elements: [{ textRun: { content: 'Hello\n' } }] } }] } } }] } }),
@@ -267,4 +268,21 @@ test('text is found in paragraphs and table cells with document indices, chips c
   assert.deepEqual(findDocText(body, '(oic)'), { start: 14, end: 19 }); // after the chip, case-insensitive
   assert.deepEqual(findDocText(body, 'TBC'), { start: 29, end: 32 });
   assert.equal(findDocText(body, 'nowhere'), null);
+});
+
+test('writing to a multi-tab sheet needs the tab, and a chip after a label gets a space', async () => {
+  const sheet = { id: LONG('sheet'), name: 'RAMs', mimeType: MIME.sheet };
+  const doc = { id: LONG('doc'), name: 'Proposal', mimeType: MIME.doc };
+  const batches: any[] = [];
+  const { tools } = workspace({ [sheet.id]: sheet, [doc.id]: doc }, {
+    sheets: { spreadsheets: { get: async () => ({ data: { sheets: [{ properties: { sheetId: 0, title: 'RPN' } }, { properties: { sheetId: 5, title: 'RA Form B' } }] } }) } },
+    docsBatchUpdate: async ({ requestBody }: any) => { batches.push(requestBody.requests); return { data: { replies: [] } }; },
+  });
+  await assert.rejects(tools.sheets_edit.invoke({ url: sheet.id, action: 'clear', range: 'A4:A6' }), /has 2 tabs: "RPN", "RA Form B"\. Say which one with tab/);
+  await tools.docs_edit.invoke({ url: doc.id, action: 'insert_inline', after_text: 'Hello', text: '[[person:azlan@nyp-gdg.com]]' });
+  // The fake doc's "Hello" starts at index 0, so the text ends at 5
+  assert.deepEqual(batches[0].slice(0, 2), [
+    { insertText: { location: { index: 5, tabId: 't.0' }, text: ' ' } },
+    { insertPerson: { location: { index: 6, tabId: 't.0' }, personProperties: { email: 'azlan@nyp-gdg.com' } } },
+  ]);
 });
