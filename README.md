@@ -8,6 +8,7 @@ This project is partially vibe-coded but also contains a substantial amount of h
 *   [Locally Running] Qwen 2.5 Coder (1.5B) (Autocomplete only)
 *   [Remotely Running] Bing Chat (a.k.a Microsoft Copilot)
 *   [Remotely Running] ChatGPT
+*   Opus 5.5 (I tried claude code pro for a bit)
 
 
 ## Class Context
