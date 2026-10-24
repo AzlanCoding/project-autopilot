@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import pino from 'pino';
 import { z } from 'zod';
 import AI, { describeBuiltinToolCall } from '../src/services/ai';
+import { builtinToolsFor, isTrue } from '../src/config/modelStudio';
 import { replyEnding, UNFINISHED_NUDGE } from '../src/services/unfinishedReply';
 import { messageBreakIndex, splitIntoMessages } from '../src/utils/common';
 
@@ -325,10 +326,14 @@ test('a failed model request (e.g. an unknown model id) throws instead of silent
 
 test("Model Studio's built-in tools are off by default", async () => {
   process.env.ALIBABA_API_KEY ||= 'test'; // The OpenAI client needs a key to be created, no requests are made
-  const real = new AI({} as any, pino({ level: 'silent' })); // USE_WEB_TOOLS isn't set in tests
-  assert.deepEqual(real.builtinTools, []);
-  assert.equal(real.useWebTools, false);
-  assert.equal(real.tools.some(t => t.name == 'web_search' || t.name == 'web_fetch'), false);
+  // Checked on the config functions, so a USE_WEB_TOOLS in the developer's .env doesn't change the result
+  assert.equal(isTrue(undefined), false);
+  assert.equal(isTrue('TRUE '), true);
+  assert.deepEqual(builtinToolsFor(false, 'modelstudio'), []);
+  assert.deepEqual(builtinToolsFor(true, 'modelstudio'), ['web_search', 'web_extractor']);
+  assert.deepEqual(builtinToolsFor(true, 'deepseek'), []); // DeepSeek ignores them, it gets function tools instead
+  const real = new AI({} as any, pino({ level: 'silent' }));
+  real.useWebTools = false;
   const { ai, toolsSent } = fakeAI([[message('Hi!')]]);
   await run(ai);
   assert.deepEqual(toolsSent[0].filter((t: any) => t.type != 'function'), []);

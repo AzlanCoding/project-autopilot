@@ -70,3 +70,56 @@ test('messages sent during a reply are handed to the model once, with a note', a
   ]);
   assert.deepEqual(await bot.messagesDuringReply('chat'), []); // Now seen, so the queued run won't reply again
 });
+
+test('group info matches participants to users, labels Sofia, masks unknown people, and is cached', async () => {
+  const bot = setup();
+  const users: { [jid: string]: any } = {
+    '6590000001@s.whatsapp.net': { id: 'user-azlan', name: 'Azlan', description: 'GDGoC member, class chairperson' },
+    '6590000002@s.whatsapp.net': { id: 'user-mary', name: 'Mary', description: '' },
+  };
+  (bot.db as any).user.getUserByJid = async (jid: string) => users[jid] ?? null;
+  let fetches = 0;
+  bot.sock = {
+    user: { id: '6599999999:1@s.whatsapp.net', lid: '100000000000099:1@lid' },
+    groupMetadata: async () => {
+      fetches++;
+      return {
+        id: '123@g.us', subject: 'GDGoC NYP Core', desc: 'Planning DevFest',
+        participants: [
+          { id: '100000000000001@lid', phoneNumber: '6590000001@s.whatsapp.net', admin: 'superadmin' },
+          { id: '100000000000002@lid' }, // phone number only known through the LID mapping
+          { id: '100000000000003@lid' }, // not a user, no mapping
+          { id: '100000000000099@lid' }, // Sofia
+        ],
+      };
+    },
+    signalRepository: { lidMapping: { getPNForLID: async (lid: string) => lid == '100000000000002@lid' ? '6590000002:3@s.whatsapp.net' : null } },
+  } as any;
+
+  const info = await bot.getGroupInfo('123@g.us');
+  assert.deepEqual(info, {
+    id: '123@g.us', name: 'GDGoC NYP Core', description: 'Planning DevFest',
+    participants: [
+      { name: 'Azlan', userId: 'user-azlan', description: 'GDGoC member, class chairperson', admin: true },
+      { name: 'Mary', userId: 'user-mary', description: '', admin: false },
+      { name: 'Unknown (0003)', userId: null, description: null, admin: false },
+      { name: 'You (Sofia)', userId: null, description: null, admin: false },
+    ],
+  });
+  await bot.getGroupInfo('123@g.us');
+  assert.equal(fetches, 1, 'cached');
+
+  const { formatGroupInfo } = await import('../src/services/ai');
+  assert.equal(formatGroupInfo(info), [
+    'Group Chat: GDGoC NYP Core (123@g.us)',
+    'Group Description: Planning DevFest',
+    'Participants (4):',
+    '- Azlan (user ID user-azlan) [admin]: GDGoC member, class chairperson',
+    '- Mary (user ID user-mary)',
+    '- Unknown (0003)',
+    '- You (Sofia)',
+  ].join('\n'));
+  // Long descriptions are cut so big groups don't fill the prompt
+  const long = formatGroupInfo({ ...info, description: '', participants: [{ name: 'A', userId: 'a', description: 'x'.repeat(300), admin: false }] });
+  assert.match(long, /Group Description: \(none\)\nParticipants \(1\):\n- A \(user ID a\): x{200}\.\.\.$/);
+});

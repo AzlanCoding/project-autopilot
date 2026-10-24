@@ -60,8 +60,41 @@ export interface ChatAdapter {
   /** The current votes of a poll by the poll id shown in the chat history, or null if the poll isn't known. */
   getPollResults(pollId: string): Promise<PollResults | null>;
   listGroups(): Promise<{ id: string, name: string }[]>;
+  /** A group chat's name, description and participants (matched to users where known). */
+  getGroupInfo(groupId: string): Promise<GroupInfo>;
   /** Load the chat history with a user id or group id, oldest first. */
   loadChatById(id: string): Promise<PreProccessChatMsg[]>;
+}
+
+export interface GroupParticipantInfo {
+  /** The user's name, `You (Sofia)`, or `Unknown (<last 4 digits>)` for people who aren't users. */
+  name: string,
+  userId: string | null,
+  description: string | null,
+  admin: boolean,
+}
+
+export interface GroupInfo {
+  id: string,
+  name: string,
+  description: string,
+  participants: GroupParticipantInfo[],
+}
+
+/** Descriptions are cut to this length so a large group doesn't fill the prompt. */
+const GROUP_DESCRIPTION_MAX_CHARS = 200;
+const cut = (text: string, max: number) => text.length > max ? `${text.slice(0, max).trimEnd()}...` : text;
+
+/** A group's info for the system prompt and `get_group_info`. */
+export function formatGroupInfo(info: GroupInfo): string {
+  const people = info.participants.map(p => {
+    const id = p.userId ? ` (user ID ${p.userId})` : '';
+    const description = p.description?.trim() ? `: ${cut(p.description.trim().replace(/\s+/g, ' '), GROUP_DESCRIPTION_MAX_CHARS)}` : '';
+    return `- ${p.name}${id}${p.admin ? ' [admin]' : ''}${description}`;
+  });
+  return `Group Chat: ${info.name} (${info.id})\n` +
+    `Group Description: ${info.description.trim() ? info.description.trim() : '(none)'}\n` +
+    `Participants (${info.participants.length}):\n${people.join('\n')}`;
 }
 
 export interface ChatMedia {
@@ -169,6 +202,7 @@ export default class AI {
   sendPollTool?: ExtendedDynamicStructuredTool;
   readPollTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
+  getGroupInfoTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
   chatAdapter?: ChatAdapter;
 
@@ -913,6 +947,21 @@ ${await message()}`,
       }
     }, "{}");
 
+    this.getGroupInfoTool = new ExtendedDynamicStructuredTool({
+      name: 'get_group_info',
+      description: "Get a group chat's name, description and participants, with each participant's user ID and description (which says e.g. whether they're a GDGoC member). Use `list_groups` to find group ids.",
+      schema: z.object({
+        group_id: z.string().describe("[Required] The group id, ending with `@g.us`."),
+      }),
+      func: async (args) => {
+        const { group_id } = args as any;
+        if (!String(group_id).endsWith('@g.us')) {
+          throw Error(`"${group_id}" is not a group id, group ids end with @g.us. Get them from \`list_groups\`.`);
+        }
+        return formatGroupInfo(await adapter.getGroupInfo(group_id));
+      }
+    }, "{group_id: string}");
+
     this.readChatHistoryTool = new ExtendedDynamicStructuredTool({
       name: "read_chat_history",
       description: "Read the recent chat history you had with a user (by user id) or in a group chat (by group id ending with `@g.us`). Useful to check if someone replied, to recall what was said in another chat, or to read older messages of the current chat that are left out of your history (use `after`). Be discreet about sharing private chats with other people.",
@@ -1014,7 +1063,7 @@ ${await message()}`,
       }
     }, "{poll_id: string}");
 
-    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.sendPollTool, this.readPollTool);
+    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.getGroupInfoTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.sendPollTool, this.readPollTool);
     this.bindModel();
   }
 
@@ -1894,14 +1943,15 @@ ${await message()}`,
       ` Otherwise, behave exactly as you would with real users.`;
   }
 
-  async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string): Promise<string> {
+  /** @param group For group chats, the group's info (description and participants) to include. */
+  async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string, group?: GroupInfo): Promise<string> {
     // 1. Read the System Prompt from the file
     const systemPromptPath = path.resolve("src/static/prompts/system.md");
     const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
 
     // 2. Get memory for a current user id
     const memories = mode == 'group' ? '' : await this.memoryQueryByUserTool.func({ userId: current_user_id }) as string;
-    const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
+    const memoryPrompt = `${mode == 'group' ? (group ? `Current ${formatGroupInfo(group)}` : `Current Group Chat: ${current_user_name} (${current_user_id})`) : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
     User Memories: ${JSON.parse(memories).data.filter((m: any) => m.category != 'core').slice(-10).map((m: any) => m.text).join(';')}
     If you have no memory of saying hi to this user for the first time, please use the \`memory_write\` tool call to save this event (leave category empty) and then introduce yourself to the user.`}
     Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (stickers and GIFs you send are simulated, media_id images are unavailable)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}

@@ -86,7 +86,7 @@ test('send_poll sends to the current chat, and read_poll shows the votes', async
   const sent: any[] = [];
   const ai = new AI({} as any, pino({ level: 'silent' }));
   ai.registerChatTools({
-    sendMessage: async () => { }, sendStickerGif: async () => { }, getMedia: async () => { throw Error('unused'); }, listGroups: async () => [], loadChatById: async () => [],
+    sendMessage: async () => { }, sendStickerGif: async () => { }, getMedia: async () => { throw Error('unused'); }, listGroups: async () => [], getGroupInfo: async () => { throw Error('unused'); }, loadChatById: async () => [],
     sendPoll: async (id, p) => { sent.push([id, p]); return 'POLL1'; },
     getPollResults: async (id) => id == 'POLL1' ? { poll: poll as any, options: [{ option: 'Mac', voters: [] }, { option: 'Sushi', voters: ['John'] }, { option: 'Pasta', voters: [] }], voters: ['John'] } : null,
   });

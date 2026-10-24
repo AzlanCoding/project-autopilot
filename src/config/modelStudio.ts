@@ -34,10 +34,16 @@ export const CHAT_MODEL = process.env.CHAT_MODEL || 'qwen3.8-flash';
  * calling DeepSeek's Search & Fetch APIs (see `webTools.ts`). Off by default because searches are slow and costly: on
  * Model Studio one news question took 46k-111k input tokens against ~5k for a normal reply (tested 2026-10-24).
  */
-export const USE_WEB_TOOLS = process.env.USE_WEB_TOOLS?.trim().toLowerCase() == 'true';
+export const USE_WEB_TOOLS = isTrue(process.env.USE_WEB_TOOLS);
+export function isTrue(value?: string) {
+  return value?.trim().toLowerCase() == 'true';
+}
 
 /** Model Studio's built-in tools sent with each request: only the web tools, and only when chatting through Model Studio. */
-export const BUILTIN_TOOLS: string[] = USE_WEB_TOOLS && CHAT_PROVIDER == 'modelstudio' ? ['web_search', 'web_extractor'] : [];
+export const BUILTIN_TOOLS: string[] = builtinToolsFor(USE_WEB_TOOLS, CHAT_PROVIDER);
+export function builtinToolsFor(useWebTools: boolean, provider: 'modelstudio' | 'deepseek'): string[] {
+  return useWebTools && provider == 'modelstudio' ? ['web_search', 'web_extractor'] : [];
+}
 
 // Model Studio model used for describing stickers. Falls back to CHAT_MODEL only if that is a Model Studio model.
 export const STICKER_PROCESSING_MODEL = process.env.STICKER_PROCESSING_MODEL || (CHAT_PROVIDER == 'modelstudio' ? CHAT_MODEL : 'qwen3.8-flash');

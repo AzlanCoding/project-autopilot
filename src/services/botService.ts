@@ -10,7 +10,7 @@ import { BufferSystem } from './bufferSystem';
 import { decideGroupReply, DecisionMsg, ReplyDecision } from './replyDecision';
 import type Store from "./store";
 import type AI from "./ai";
-import type { ChatAdapter, ChatMedia } from "./ai";
+import type { ChatAdapter, ChatMedia, GroupInfo, GroupParticipantInfo } from "./ai";
 import { chatContext } from './chatContext';
 import { toUnixSeconds } from '../utils/common';
 import { VIDEO_ENABLED } from '../config/media';
@@ -20,6 +20,8 @@ import { EasyInputMessage, ResponseInput, ResponseInputItem } from "openai/resou
 
 
 const BOTTLE_STORE_NAME = 'sofia';
+/** How long a group's info is reused before it is fetched again (it is also cleared when the group changes). */
+const GROUP_INFO_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Text shown to Sofia for a message. Media get a `media_id` (the WhatsApp message id) she can pass to `view_media`,
@@ -117,6 +119,8 @@ export class SofiaBot implements ChatAdapter {
   private mediaIndex = new Map<string, string>();
   /** Quoted message id -> the quoted message, for quoted media whose original message isn't in the store. */
   private quotedMediaIndex = new Map<string, WAMessage>();
+  /** Group id -> its info and when it was fetched, see `getGroupInfo`. Cleared when the group or its members change. */
+  private groupInfoCache = new Map<string, { at: number, info: GroupInfo }>();
   /** Chat id -> the newest message Sofia has seen (replied to, chose not to reply to, or saw mid-reply). In memory only. */
   private lastSeen: { [chatId: string]: { id?: string, time: number } | undefined } = {};
   private saveAuthState?: () => Promise<any>;
@@ -205,6 +209,14 @@ export class SofiaBot implements ChatAdapter {
     }
     this.sock.ev.process(
       async (events) => {
+        // A group's name, description or members changed, fetch its info again next time
+        for (const update of events['groups.update'] ?? []) {
+          if (update.id) this.groupInfoCache.delete(update.id);
+        }
+        if (events['group-participants.update']) {
+          this.groupInfoCache.delete(events['group-participants.update'].id);
+        }
+
         // connection update handler
         if (events['connection.update']) {
           const update = events['connection.update'];
@@ -317,7 +329,11 @@ export class SofiaBot implements ChatAdapter {
                             let systemPrompt;
                             if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
                               let grpName = (await this.store?.contacts.id(msg.key.remoteJid))?.name || "Unknown Group Chat";
-                              systemPrompt = await this.ai.generatePrompt('group', grpName, msg.key.remoteJid);
+                              const group = await this.getGroupInfo(msg.key.remoteJid).catch(e => {
+                                this.logger.error(e, `Failed to get group info for ${msg.key.remoteJid}`);
+                                return undefined;
+                              });
+                              systemPrompt = await this.ai.generatePrompt('group', group?.name ?? grpName, msg.key.remoteJid, undefined, group);
                             }
                             else if (msg.key.remoteJidAlt) {
                               const current_user = await this.db.user.getUserByJid(msg.key.remoteJidAlt)
@@ -850,6 +866,37 @@ export class SofiaBot implements ChatAdapter {
       broadcast: false,
     };
     await this.sock.sendMessage(jid, { text }, label ? { quoted: replyMsg } : {});
+  }
+
+  /**
+   * A group's name, description and participants, each matched to a user by phone number (resolved from the LID if
+   * needed). People who aren't users are shown as `Unknown (<last 4 digits>)`, never with their full number. Cached for
+   * `GROUP_INFO_TTL_MS`, and cleared when WhatsApp says the group or its members changed.
+   */
+  public async getGroupInfo(groupId: string): Promise<GroupInfo> {
+    const cached = this.groupInfoCache.get(groupId);
+    if (cached && Date.now() - cached.at < GROUP_INFO_TTL_MS) {
+      return cached.info;
+    }
+    if (!this.sock) {
+      throw Error("Bot is not connected.");
+    }
+    const metadata = await this.sock.groupMetadata(groupId);
+    const participants = await Promise.all(metadata.participants.map(async (p): Promise<GroupParticipantInfo> => {
+      const admin = !!p.admin || !!p.isAdmin || !!p.isSuperAdmin;
+      if (this.isOwnJid(p.id) || this.isOwnJid(p.phoneNumber) || this.isOwnJid(p.lid)) {
+        return { name: 'You (Sofia)', userId: null, description: null, admin };
+      }
+      const pn = p.phoneNumber || (p.id.endsWith('@s.whatsapp.net') ? p.id : await this.sock?.signalRepository.lidMapping.getPNForLID(p.id).catch(() => null));
+      const user = pn ? await this.db.user.getUserByJid(this.parseJid(pn)!) : null;
+      if (user) {
+        return { name: user.name, userId: user.id, description: user.description ?? null, admin };
+      }
+      return { name: `Unknown (${(pn ?? p.id).split('@')[0].split(':')[0].slice(-4)})`, userId: null, description: null, admin };
+    }));
+    const info: GroupInfo = { id: groupId, name: metadata.subject, description: metadata.desc ?? '', participants };
+    this.groupInfoCache.set(groupId, { at: Date.now(), info });
+    return info;
   }
 
   public async listGroups(): Promise<{ id: string, name: string }[]> {
