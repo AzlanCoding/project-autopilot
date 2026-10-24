@@ -77,6 +77,7 @@ src/services/
   workspaceTools.ts        Workspace read tools, image_search, directory_search
   workspaceWriteTools.ts   Workspace write tools (drive_manage, drive_share, docs/sheets/slides_edit, *_batch_update, comments)
   fileTools.ts             send_file and extract_images (the img_N cache shared with the image tools)
+  textFileTools.ts         drive_file (plain Drive files: numbered reads, exact find-and-replace edits, stale-read check), fetch_url
   imageTools.ts            generate_image / edit_image (Qwen-Image, /images/generations), search_icons / material_icon
   imageSearch.ts           Image search (Model Studio web_search_image, in its own Qwen request)
   webTools.ts              DeepSeek Search & Fetch

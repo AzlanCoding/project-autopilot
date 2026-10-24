@@ -5,6 +5,7 @@ import { readPdfText } from '../utils/pdf';
 import { fetchPublic } from '../utils/safeFetch';
 import { GoogleWorkspace, MIME } from './googleWorkspace';
 import { searchImages } from './imageSearch';
+import { isTextFile, numberLines } from './textFileTools';
 import { capText, sheetTabs, slidesText } from './workspaceFormat';
 
 const url = (what = 'file') => z.string().describe(`[Required] The ${what}'s link (or file id), e.g. https://docs.google.com/document/d/<id>/edit`);
@@ -49,6 +50,10 @@ export function createWorkspaceReadTools(ws: GoogleWorkspace): ExtendedDynamicSt
       if (file.mimeType == MIME.pdf) {
         const pdf = await readPdfText(await ws.download(file));
         return `${ws.header(file)}\n${pdf.pageCount} pages\n\n${pdf.text}${pdf.scanned ? '\n\n[Little or no text, probably scanned. Use `view_pdf_page` to look at pages.]' : ''}`;
+      }
+      if (isTextFile(file.mimeType, file.name ?? '')) {
+        const text = (await ws.download(file, 10 * 1024 * 1024)).toString('utf8');
+        return `${ws.header(file)}\n\n${numberLines(text)}\n(Edit it with drive_file.)`;
       }
       if (file.mimeType?.startsWith('image/')) {
         const image = await toModelImage(await ws.download(file, IMAGE_MAX_BYTES), file.mimeType);

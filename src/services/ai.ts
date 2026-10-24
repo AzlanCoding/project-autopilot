@@ -38,6 +38,7 @@ import { createWorkspaceReadTools } from './workspaceTools';
 import { createWorkspaceWriteTools } from './workspaceWriteTools';
 import { createFileTools, ExtractedImages } from './fileTools';
 import { createImageTools } from './imageTools';
+import { createDriveFileTool, createFetchUrlTool } from './textFileTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
@@ -781,6 +782,7 @@ export default class AI {
         ...createWorkspaceReadTools(this.workspace),
         // WhatsApp images (by media_id) can be inserted once the chat tools are registered
         ...createWorkspaceWriteTools(this.workspace, { getChatMedia: id => this.chatAdapter!.getMedia(id), getImage: id => this.extractedImages.get(id) }),
+        createDriveFileTool(this.workspace),
       ];
     }
 
@@ -794,6 +796,7 @@ export default class AI {
     this.tools = [
       ...(this.useWebTools && this.chatProvider == 'deepseek' ? [this.webSearchTool, this.webFetchTool] : []),
       ...this.imageTools,
+      createFetchUrlTool(),
       ...this.workspaceTools,
       this.getCurrentTimeTool,
       this.memoryWriteTool, this.memoryUpdateTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
