@@ -10,7 +10,7 @@ import { BufferSystem } from './bufferSystem';
 import { decideGroupReply, DecisionMsg, ReplyDecision } from './replyDecision';
 import type Store from "./store";
 import type AI from "./ai";
-import type { ChatAdapter, ChatMedia, GroupInfo, GroupParticipantInfo } from "./ai";
+import type { ChatAdapter, ChatMedia, GroupInfo, GroupParticipantInfo, OutgoingFile } from "./ai";
 import { PDF_MAX_BYTES } from "../utils/pdf";
 import { chatContext } from './chatContext';
 import { toUnixSeconds } from '../utils/common';
@@ -778,6 +778,17 @@ export class SofiaBot implements ChatAdapter {
       throw Error(`Unknown user with id ${id}`);
     }
     return user.whatsapp_jid;
+  }
+
+  public async sendFile(id: string, file: OutgoingFile): Promise<void> {
+    if (!this.sock) {
+      throw Error("Bot is not connected.");
+    }
+    // GIFs and WebP would need converting to show as photos, so they go as documents
+    const asPhoto = file.mime == 'image/png' || file.mime == 'image/jpeg';
+    await this.sock.sendMessage(await this.resolveJid(id), asPhoto
+      ? { image: file.buffer, mimetype: file.mime, ...(file.caption ? { caption: file.caption } : {}) }
+      : { document: file.buffer, mimetype: file.mime, fileName: file.fileName, ...(file.caption ? { caption: file.caption } : {}) });
   }
 
   public async sendStickerGif(id: string, sticker: Sticker): Promise<void> {

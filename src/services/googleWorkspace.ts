@@ -232,6 +232,19 @@ export class GoogleWorkspace {
     return { buffer: Buffer.from(await res.arrayBuffer()), number };
   }
 
+  /** Downloads an image link from the APIs (Docs contentUri, Slides contentUrl), signed in as Sofia if it needs it. */
+  async fetchContent(url: string): Promise<Buffer> {
+    let res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    if (res.status == 401 || res.status == 403) {
+      const { token } = await GoogleWorkspace.authClient(this.logger).getAccessToken();
+      res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30000) });
+    }
+    if (!res.ok) {
+      throw Error(`Couldn't download the image (HTTP ${res.status}).`);
+    }
+    return Buffer.from(await res.arrayBuffer());
+  }
+
   // ---------- Drive ----------
 
   /** Downloads a non-Google file (PDF, image, Office file...). */

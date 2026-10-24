@@ -35,6 +35,7 @@ import { WORKSPACE_ENABLED } from '../config/googleWorkspace';
 import { GoogleWorkspace, MIME } from './googleWorkspace';
 import { createWorkspaceReadTools } from './workspaceTools';
 import { createWorkspaceWriteTools } from './workspaceWriteTools';
+import { createFileTools, ExtractedImages } from './fileTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
@@ -52,6 +53,8 @@ export interface ChatAdapter {
    * (quoting an "I am an AI Agent" message), only the first message of a send is labelled.
    */
   sendMessage(id: string, text: string, label?: boolean): Promise<void>;
+  /** Send a file or image (images as photos, everything else as a document) to a user id, group id or WhatsApp jid. */
+  sendFile(id: string, file: OutgoingFile): Promise<void>;
   /** Send a sticker or GIF to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
   sendStickerGif(id: string, sticker: Sticker): Promise<void>;
   /** Download an image, sticker, GIF, video or document by the media id shown in the chat history. */
@@ -65,6 +68,13 @@ export interface ChatAdapter {
   getGroupInfo(groupId: string): Promise<GroupInfo>;
   /** Load the chat history with a user id or group id, oldest first. */
   loadChatById(id: string): Promise<PreProccessChatMsg[]>;
+}
+
+export interface OutgoingFile {
+  buffer: Buffer,
+  mime: string,
+  fileName: string,
+  caption?: string,
 }
 
 export interface GroupParticipantInfo {
@@ -187,6 +197,8 @@ export default class AI {
   /** Sofia's Google Workspace account, set when it's signed in (`pnpm google-auth`). */
   workspace?: GoogleWorkspace;
   workspaceTools: ExtendedDynamicStructuredTool[] = [];
+  /** Images from `extract_images`, by id (img_1...). */
+  extractedImages = new ExtractedImages();
 
   // Web Tools on DeepSeek (Model Studio's are built-in tools, see `builtinTools`)
   webSearchTool: ExtendedDynamicStructuredTool;
@@ -205,6 +217,8 @@ export default class AI {
   listGroupsTool?: ExtendedDynamicStructuredTool;
   getGroupInfoTool?: ExtendedDynamicStructuredTool;
   readPdfTool?: ExtendedDynamicStructuredTool;
+  /** send_file, extract_images */
+  fileTools: ExtendedDynamicStructuredTool[] = [];
   viewPdfPageTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
   chatAdapter?: ChatAdapter;
@@ -935,12 +949,16 @@ ${await message()}`,
 
     this.viewMediaTool = new ExtendedDynamicStructuredTool({
       name: "view_media",
-      description: "Download and view an image, sticker, GIF or video from the chat history by its `media_id` (shown like `<WhatsApp Image media_id=...>`). For GIFs, animated stickers and videos you only see the first frame.",
+      description: "Download and view an image, sticker, GIF or video from the chat history by its `media_id` (shown like `<WhatsApp Image media_id=...>`), or an image from `extract_images` (img_1). For GIFs, animated stickers and videos you only see the first frame.",
       schema: z.object({
         media_id: z.string().describe("[Required] The media_id from the chat history."),
       }),
       func: async (args): Promise<ToolImageResult> => {
         const { media_id } = args as any;
+        if (/^img_\d+$/.test(String(media_id).trim())) {
+          const extracted = this.extractedImages.get(media_id);
+          return { text: `${media_id} (${extracted.label}) is attached in the next message.`, image: await toModelImage(extracted.buffer, extracted.mime) };
+        }
         const media = await adapter.getMedia(media_id);
         if (media.kind == 'document') {
           throw Error(`${media_id} is a document ("${media.fileName}"), not an image. Use \`read_pdf\` to read a PDF, or \`view_pdf_page\` to see one of its pages.`);
@@ -1111,6 +1129,8 @@ ${await message()}`,
       }
     }, "{poll_id: string}");
 
+    this.fileTools = createFileTools({ adapter, workspace: this.workspace, extracted: this.extractedImages });
+    this.tools.push(...this.fileTools);
     this.tools.push(this.sendMessageTool, this.listGroupsTool, this.getGroupInfoTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.readPdfTool, this.viewPdfPageTool, this.sendPollTool, this.readPollTool);
     this.bindModel();
   }

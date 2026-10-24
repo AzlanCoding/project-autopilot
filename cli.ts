@@ -13,7 +13,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import readline from 'readline';
 import pino from 'pino';
-import AI, { ChatAdapter, ChatMedia, GroupInfo, describeBuiltinToolCall } from './src/services/ai';
+import AI, { ChatAdapter, ChatMedia, GroupInfo, OutgoingFile, describeBuiltinToolCall } from './src/services/ai';
 import type { Sticker } from './src/models/Sticker';
 import { chatContext } from './src/services/chatContext';
 import Store from './src/services/store';
@@ -66,6 +66,13 @@ class MockChatAdapter implements ChatAdapter {
     const pollId = `mock-poll-${Math.random().toString(36).slice(2, 8)}`;
     await this.record(id, 'AI', `<WhatsApp Poll poll_id=${pollId}> "${poll.question}" Options: ${poll.options.join(' | ')}`);
     return pollId;
+  }
+
+  async sendFile(id: string, file: OutgoingFile) {
+    const name = id.endsWith('@g.us') ? this.groups.find(g => g.id == id)?.name : (await this.db.user.findById(id))?.name ?? id;
+    const kind = file.mime.startsWith('image/') ? 'Image' : 'Document';
+    console.log(`\n📎 [${kind} -> ${name} (${id})] ${file.fileName} (${file.mime}, ${Math.round(file.buffer.length / 1024)} KB)${file.caption ? ` ${file.caption}` : ''}\n`);
+    await this.record(id, 'AI', `<WhatsApp ${kind}${kind == 'Document' ? ` "${file.fileName}"` : ''}>${file.caption ? ` ${file.caption}` : ''}`);
   }
 
   async getPollResults(): Promise<null> {

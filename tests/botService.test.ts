@@ -123,3 +123,17 @@ test('group info matches participants to users, labels Sofia, masks unknown peop
   const long = formatGroupInfo({ ...info, description: '', participants: [{ name: 'A', userId: 'a', description: 'x'.repeat(300), admin: false }] });
   assert.match(long, /Group Description: \(none\)\nParticipants \(1\):\n- A \(user ID a\): x{200}\.\.\.$/);
 });
+
+test('files are sent as photos when they are PNG or JPEG, everything else as documents', async () => {
+  const bot = setup();
+  const messages: any[] = [];
+  bot.sock = { sendMessage: async (jid: string, content: any) => { messages.push({ jid, ...content, image: content.image ? 'buf' : undefined, document: content.document ? 'buf' : undefined }); } } as any;
+  await bot.sendFile('123@g.us', { buffer: Buffer.from('x'), mime: 'image/png', fileName: 'slide.png', caption: 'Slide 4' });
+  await bot.sendFile('123@g.us', { buffer: Buffer.from('x'), mime: 'application/pdf', fileName: 'Proposal.pdf' });
+  await bot.sendFile('123@g.us', { buffer: Buffer.from('x'), mime: 'image/gif', fileName: 'party.gif' });
+  assert.deepEqual(messages, [
+    { jid: '123@g.us', image: 'buf', mimetype: 'image/png', caption: 'Slide 4', document: undefined },
+    { jid: '123@g.us', document: 'buf', mimetype: 'application/pdf', fileName: 'Proposal.pdf', image: undefined },
+    { jid: '123@g.us', document: 'buf', mimetype: 'image/gif', fileName: 'party.gif', image: undefined },
+  ]);
+});

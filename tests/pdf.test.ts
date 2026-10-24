@@ -123,7 +123,7 @@ test('read_pdf and view_pdf_page read WhatsApp PDFs, other media is pointed to t
   };
   const ai = new AI({} as any, pino({ level: 'silent' }));
   ai.registerChatTools({
-    sendMessage: async () => { }, sendStickerGif: async () => { }, listGroups: async () => [], getGroupInfo: async () => { throw Error('unused'); },
+    sendMessage: async () => { }, sendStickerGif: async () => { }, listGroups: async () => [], getGroupInfo: async () => { throw Error('unused'); }, sendFile: async () => { },
     loadChatById: async () => [], sendPoll: async () => 'unused', getPollResults: async () => null,
     getMedia: async (id: string) => media[id],
   });
@@ -135,4 +135,34 @@ test('read_pdf and view_pdf_page read WhatsApp PDFs, other media is pointed to t
   await assert.rejects(ai.readPdfTool!.invoke({ source: 'DOC2' }), /"old\.doc" isn't a PDF/);
   await assert.rejects(ai.readPdfTool!.invoke({ source: 'IMG1' }), /is an image, not a PDF\. Use `view_media`/);
   await assert.rejects(ai.viewMediaTool!.invoke({ media_id: 'DOC1' }), /is a document \("checklist\.pdf"\).*`read_pdf`/);
+});
+
+test('send_file sends a PDF page as an image or the PDF itself, and extract_images pulls out images to view and send', skip, async () => {
+  process.env.ALIBABA_API_KEY ||= 'test';
+  const { chatContext } = await import('../src/services/chatContext');
+  const pdf = makePdf([['Poster']], { image: true });
+  const sent: { id: string, mime: string, fileName: string, caption?: string }[] = [];
+  const ai = new AI({} as any, pino({ level: 'silent' }));
+  ai.registerChatTools({
+    sendMessage: async () => { }, sendStickerGif: async () => { }, listGroups: async () => [], getGroupInfo: async () => { throw Error('unused'); },
+    loadChatById: async () => [], sendPoll: async () => 'unused', getPollResults: async () => null,
+    getMedia: async () => ({ buffer: pdf, mime: 'application/pdf', kind: 'document', fileName: 'poster.pdf' }),
+    sendFile: async (id: string, f: any) => { sent.push({ id, mime: f.mime, fileName: f.fileName, caption: f.caption }); },
+  });
+  const tool = (name: string) => ai.tools.find(t => t.name == name)!;
+  await chatContext.run({ chatId: 'group1@g.us' }, async () => {
+    assert.match(await tool('send_file').invoke({ source: 'DOC1', page: 1, end_message: false }) as string, /^Sent the image/);
+    assert.match(await tool('send_file').invoke({ source: 'DOC1', caption: 'the poster', end_message: true }) as string, /^Sent "poster\.pdf"/);
+    assert.match(await tool('extract_images').invoke({ source: 'DOC1' }) as string, /^Found 1 image:\nimg_1: page 1, 64x64$/);
+    const viewed: any = await ai.viewMediaTool!.func({ media_id: 'img_1' });
+    assert.match(viewed.text, /img_1 \(page 1\) is attached/);
+    await tool('send_file').invoke({ source: 'img_1', end_message: true });
+  });
+  assert.deepEqual(sent, [
+    { id: 'group1@g.us', mime: 'image/png', fileName: 'poster page 1.png', caption: undefined },
+    { id: 'group1@g.us', mime: 'application/pdf', fileName: 'poster.pdf', caption: 'the poster' },
+    { id: 'group1@g.us', mime: 'image/png', fileName: 'img_1.png', caption: undefined },
+  ]);
+  await assert.rejects(tool('send_file').invoke({ source: 'DOC1', end_message: true }), /not replying in a chat/);
+  await assert.rejects(ai.viewMediaTool!.func({ media_id: 'img_9' }) as Promise<unknown>, /isn't available any more/);
 });
