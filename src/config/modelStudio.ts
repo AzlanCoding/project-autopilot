@@ -6,5 +6,8 @@ import 'dotenv/config';
  */
 export const MODELSTUDIO_BASE_URL = (process.env.MODELSTUDIO_WORKSPACE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1").replace(/\/+$/, '');
 
-// Alibaba Model Studio model used for chats, scheduled tasks and describing stickers (it can read images)
+// Alibaba Model Studio model used for chats and scheduled tasks and can read images
 export const CHAT_MODEL = process.env.CHAT_MODEL || 'qwen3.8-flash';
+
+// Alibaba Model Studio model used for describing stickers 
+export const STICKER_PROCESSING_MODEL = process.env.STICKER_PROCESSING_MODEL || CHAT_MODEL;

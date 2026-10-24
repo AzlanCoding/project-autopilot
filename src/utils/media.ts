@@ -36,7 +36,7 @@ async function ffmpeg(input: Buffer, inputExt: string, outputExt: string, args: 
     const outFile = path.join(dir, `out.${outputExt}`);
     await fs.writeFile(inFile, input);
     // One thread keeps ffmpeg's peak memory around 75MB (it scales with the thread count)
-    await execFileAsync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-threads', '1', '-i', inFile, '-threads', '1', ...args, outFile], { timeout: 60000 });
+    await execFileAsync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-threads', '1', '-i', inFile, '-threads', '1', ...args, outFile], { timeout: 120_000 });
     return await fs.readFile(outFile);
   }
   catch (e: any) {
@@ -87,6 +87,27 @@ export async function toModelImage(buffer: Buffer, mime: string): Promise<ModelI
     height: out.info.height,
     downscaled,
   };
+}
+
+/** Model Studio rejects base64 videos of 10MB or more (the encoded string, not the file). */
+const MODEL_VIDEO_MAX_BASE64 = 10 * 1024 * 1024;
+
+export interface ModelVideo {
+  /** `data:` URL for an `input_video` content part. */
+  videoUrl: string,
+}
+
+/**
+ * Prepares a GIF or video for the vision model as a whole mp4, so it sees the motion and not just the first frame.
+ * Returns null if it is too big to send as base64.
+ */
+export async function toModelVideo(buffer: Buffer, mime: string): Promise<ModelVideo | null> {
+  const mp4 = mime == 'video/mp4' ? buffer : await toGifMp4(buffer, mime);
+  const base64 = mp4.toString('base64');
+  if (base64.length >= MODEL_VIDEO_MAX_BASE64) {
+    return null;
+  }
+  return { videoUrl: `data:video/mp4;base64,${base64}` };
 }
 
 /** Converts an image (png, jpeg, webp, GIF, animated or not) into a 512x512 WhatsApp sticker webp. */

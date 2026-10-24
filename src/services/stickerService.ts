@@ -5,7 +5,7 @@ import { ModelStatic } from 'sequelize';
 import { Logger } from 'pino';
 import type Store from './store';
 import { Sticker, StickerKind, StickerStatus } from '../models/Sticker';
-import { isAnimated, toGifMp4, toModelImage, toStickerWebp } from '../utils/media';
+import { isAnimated, toGifMp4, toModelImage, toModelVideo, toStickerWebp } from '../utils/media';
 import { describeStickerGif } from '../utils/vision';
 
 export const STICKER_DIR = './assets/stickers';
@@ -128,9 +128,10 @@ export class StickerService {
     return { sticker, created: true };
   }
 
-  /** Writes a description of a sticker or GIF with the vision model. */
+  /** Writes a description of a sticker or GIF with the vision model. GIFs are sent as a video (first frame if too big). */
   async describe(buffer: Buffer, mime: string, kind: StickerKind) {
-    return describeStickerGif(await toModelImage(buffer, mime), kind);
+    const video = kind == 'gif' ? await toModelVideo(buffer, mime) : null;
+    return describeStickerGif(video ?? await toModelImage(buffer, mime), kind);
   }
 
   /** Re-writes a sticker's description with the vision model. */
