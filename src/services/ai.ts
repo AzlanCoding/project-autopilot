@@ -22,6 +22,7 @@ import type { PreProccessChatMsg } from './botService';
 import type { Sticker } from '../models/Sticker';
 import type { PollResults } from './pollService';
 import { ModelImage, toModelImage } from '../utils/media';
+import { parsePages, pdfPageCount, pdfPageImage, readPdfText } from '../utils/pdf';
 import { chatContext } from './chatContext';
 import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
 import getCalendarEvents from '../utils/getCalendarEvents';
@@ -53,7 +54,7 @@ export interface ChatAdapter {
   sendMessage(id: string, text: string, label?: boolean): Promise<void>;
   /** Send a sticker or GIF to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
   sendStickerGif(id: string, sticker: Sticker): Promise<void>;
-  /** Download an image, sticker, GIF or video by the media id shown in the chat history. */
+  /** Download an image, sticker, GIF, video or document by the media id shown in the chat history. */
   getMedia(mediaId: string): Promise<ChatMedia>;
   /** Send a poll to a user id, group id (ending with `@g.us`) or WhatsApp jid, returns its poll id. */
   sendPoll(id: string, poll: { question: string, options: string[], multiple: boolean }): Promise<string>;
@@ -100,7 +101,9 @@ export function formatGroupInfo(info: GroupInfo): string {
 export interface ChatMedia {
   buffer: Buffer,
   mime: string,
-  kind: 'image' | 'sticker' | 'gif' | 'video',
+  kind: 'image' | 'sticker' | 'gif' | 'video' | 'document',
+  /** Documents only */
+  fileName?: string,
 }
 
 /** Returned by tools that show the model an image (`view_media`), the image is added after the tool output. */
@@ -203,6 +206,8 @@ export default class AI {
   readPollTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
   getGroupInfoTool?: ExtendedDynamicStructuredTool;
+  readPdfTool?: ExtendedDynamicStructuredTool;
+  viewPdfPageTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
   chatAdapter?: ChatAdapter;
 
@@ -929,6 +934,9 @@ ${await message()}`,
       func: async (args): Promise<ToolImageResult> => {
         const { media_id } = args as any;
         const media = await adapter.getMedia(media_id);
+        if (media.kind == 'document') {
+          throw Error(`${media_id} is a document ("${media.fileName}"), not an image. Use \`read_pdf\` to read a PDF, or \`view_pdf_page\` to see one of its pages.`);
+        }
         const image = await toModelImage(media.buffer, media.mime);
         const label = { image: 'Image', sticker: 'Sticker', gif: 'GIF', video: 'Video' }[media.kind];
         return {
@@ -937,6 +945,38 @@ ${await message()}`,
         };
       }
     }, "{media_id: string}");
+
+    this.readPdfTool = new ExtendedDynamicStructuredTool({
+      name: "read_pdf",
+      description: "Read the text of a PDF sent in the chat (shown like `<WhatsApp Document media_id=... \"file.pdf\" (PDF)>`), page by page. Long PDFs are read a few pages at a time: it says which pages to read next. If a page has no text (e.g. a scanned document or a chart), look at it with `view_pdf_page`.",
+      schema: z.object({
+        source: z.string().describe("[Required] The PDF's media_id from the chat history."),
+        pages: z.string().optional().describe("[Optional] Pages to read, e.g. \"3\", \"2-5\" or \"4-\". Defaults to all pages (as many as fit)."),
+      }),
+      func: async (args) => {
+        const { source, pages } = args as any;
+        const { buffer, name } = await this.loadPdf(source);
+        const { text, pageCount, scanned } = await readPdfText(buffer, pages);
+        const note = scanned ? `\n\n[These pages have little or no text, it's probably scanned or made of images. Use \`view_pdf_page\` to look at them.]` : '';
+        return `${name} (${pageCount} page${pageCount == 1 ? '' : 's'})\n\n${text}${note}`;
+      }
+    }, "{source: string, pages?: string}");
+
+    this.viewPdfPageTool = new ExtendedDynamicStructuredTool({
+      name: "view_pdf_page",
+      description: "See one page of a PDF sent in the chat as an image, e.g. for scanned pages, charts, diagrams, posters or layouts that `read_pdf` can't show.",
+      schema: z.object({
+        source: z.string().describe("[Required] The PDF's media_id from the chat history."),
+        page: z.number().int().min(1).describe("[Required] The page number, starting at 1."),
+      }),
+      func: async (args): Promise<ToolImageResult> => {
+        const { source, page } = args as any;
+        const { buffer, name } = await this.loadPdf(source);
+        parsePages(String(page), await pdfPageCount(buffer));
+        const image = await toModelImage(await pdfPageImage(buffer, page), 'image/png');
+        return { text: `Page ${page} of ${name} is attached in the next message.`, image };
+      }
+    }, "{source: string, page: number}");
 
     this.listGroupsTool = new ExtendedDynamicStructuredTool({
       name: 'list_groups',
@@ -1063,7 +1103,7 @@ ${await message()}`,
       }
     }, "{poll_id: string}");
 
-    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.getGroupInfoTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.sendPollTool, this.readPollTool);
+    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.getGroupInfoTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.readPdfTool, this.viewPdfPageTool, this.sendPollTool, this.readPollTool);
     this.bindModel();
   }
 
@@ -1930,6 +1970,22 @@ ${await message()}`,
     }
     const read = provider == 'deepseek' ? '`web_fetch`' : '`web_extractor`';
     return `\nWeb Search: You can search the web (\`web_search\`) and read web pages (${read}). Search when someone asks about current events, news, or facts you're not sure of, instead of guessing, and keep searches few and focused: they are slow and costly, so don't search for things you already know or for class info (use \`get_timetable\`, \`assignment_list\` and your other tools for that). Summarise what you found in your own words for WhatsApp (no Markdown), and paste at most one or two source links as plain URLs when they help.`;
+  }
+
+  /** A PDF by its WhatsApp media_id (Drive links are added with the Google Workspace tools). */
+  async loadPdf(source: string): Promise<{ buffer: Buffer, name: string }> {
+    if (!this.chatAdapter) {
+      throw Error('PDFs from the chat are not available here.');
+    }
+    const media = await this.chatAdapter.getMedia(source.trim());
+    const name = media.fileName ?? source;
+    if (media.kind != 'document') {
+      throw Error(`${source} is ${media.kind == 'image' ? 'an image' : `a ${media.kind}`}, not a PDF. Use \`view_media\` to see it.`);
+    }
+    if (media.mime != 'application/pdf' && !/\.pdf$/i.test(name)) {
+      throw Error(`"${name}" isn't a PDF (${media.mime}), only PDFs can be read for now.`);
+    }
+    return { buffer: media.buffer, name };
   }
 
   /** Extra system prompt text explaining the test environment, empty outside the CLI. */

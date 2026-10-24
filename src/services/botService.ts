@@ -11,6 +11,7 @@ import { decideGroupReply, DecisionMsg, ReplyDecision } from './replyDecision';
 import type Store from "./store";
 import type AI from "./ai";
 import type { ChatAdapter, ChatMedia, GroupInfo, GroupParticipantInfo } from "./ai";
+import { PDF_MAX_BYTES } from "../utils/pdf";
 import { chatContext } from './chatContext';
 import { toUnixSeconds } from '../utils/common';
 import { VIDEO_ENABLED } from '../config/media';
@@ -29,6 +30,8 @@ const GROUP_INFO_TTL_MS = 10 * 60 * 1000;
  */
 /** The poll in a message, if it is one (WhatsApp has three versions of poll messages). */
 export const pollOf = (m?: proto.IMessage | null) => m?.pollCreationMessage || m?.pollCreationMessageV2 || m?.pollCreationMessageV3;
+/** A document (PDF, Office file...), sent with or without a caption (which WhatsApp wraps in another message). */
+export const documentOf = (m?: proto.IMessage | null) => m?.documentMessage || m?.documentWithCaptionMessage?.message?.documentMessage;
 
 export function describeContent(m: proto.IMessage, id?: string | null, { videos = VIDEO_ENABLED } = {}): string | undefined {
   const poll = pollOf(m);
@@ -50,6 +53,13 @@ export function describeContent(m: proto.IMessage, id?: string | null, { videos 
   }
   if (m.imageMessage) {
     return `<WhatsApp Image${mediaId}>${caption(m.imageMessage.caption)}`;
+  }
+  const document = documentOf(m);
+  if (document) {
+    const name = document.fileName || document.title || 'file';
+    const isPdf = document.mimetype == 'application/pdf' || /\.pdf$/i.test(name);
+    const pages = isPdf && document.pageCount ? `, ${document.pageCount} page${document.pageCount == 1 ? '' : 's'}` : '';
+    return `<WhatsApp Document${mediaId} "${name}" (${isPdf ? 'PDF' : document.mimetype || 'unknown type'}${pages})>${caption(document.caption)}`;
   }
   return m.conversation || m.extendedTextMessage?.text || undefined;
 }
@@ -267,7 +277,7 @@ export class SofiaBot implements ChatAdapter {
 
           if (upsert.type === 'notify') {
             for (const msg of upsert.messages) {
-              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage || pollOf(msg.message));
+              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage || documentOf(msg.message) || pollOf(msg.message));
               if (!msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
                 // Received stickers and GIFs are saved as pending until approved in the web UI
                 this.saveReceivedStickerGif(msg).catch(e => this.logger.error(e, 'Failed to save received sticker/GIF'));
@@ -660,7 +670,7 @@ export class SofiaBot implements ChatAdapter {
     };
     const getText = (m: WAMessage) => m.message ? describeContent(m.message, m.key.id) : undefined;
     const getQuotedText = (q: proto.IMessage, id?: string | null) => this.shortenQuotedText(describeContent(q, id));
-    const getContextInfo = (m: WAMessage) => m.message?.extendedTextMessage?.contextInfo || m.message?.imageMessage?.contextInfo || m.message?.videoMessage?.contextInfo || m.message?.stickerMessage?.contextInfo;
+    const getContextInfo = (m: WAMessage) => m.message?.extendedTextMessage?.contextInfo || m.message?.imageMessage?.contextInfo || m.message?.videoMessage?.contextInfo || m.message?.stickerMessage?.contextInfo || documentOf(m.message)?.contextInfo;
     const toChatMsg = async (m: WAMessage, user: string | null): Promise<PreProccessChatMsg> => {
       const contextInfo = getContextInfo(m);
       if (contextInfo?.quotedMessage && contextInfo.stanzaId) {
@@ -803,8 +813,17 @@ export class SofiaBot implements ChatAdapter {
       msg = this.quotedMediaIndex.get(mediaId);
     }
     const content = msg?.message;
-    if (!msg || !content || !(content.imageMessage || content.stickerMessage || content.videoMessage)) {
-      throw Error(`No image, sticker, GIF or video with media_id "${mediaId}" found.`);
+    const document = documentOf(content);
+    if (!msg || !content || !(content.imageMessage || content.stickerMessage || content.videoMessage || document)) {
+      throw Error(`No image, sticker, GIF, video or document with media_id "${mediaId}" found.`);
+    }
+    if (document) {
+      // Checked before downloading, which is the expensive part
+      if (Number(document.fileLength ?? 0) >= PDF_MAX_BYTES) {
+        throw Error(`The document is too big to read (${Math.round(Number(document.fileLength) / 1024 / 1024)} MB, the limit is ${PDF_MAX_BYTES / 1024 / 1024} MB).`);
+      }
+      const fileName = document.fileName || document.title || 'file';
+      return { buffer: await this.downloadMedia(msg), mime: document.mimetype || 'application/octet-stream', kind: 'document', fileName };
     }
     if (content.videoMessage && !content.videoMessage.gifPlayback && !VIDEO_ENABLED) {
       // Checked before downloading, which is the expensive part
