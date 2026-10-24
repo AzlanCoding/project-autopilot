@@ -76,7 +76,8 @@ src/services/
   workspaceEdit.ts         batchUpdate request builders (Markdown -> Docs, table cells, A1 ranges, Slides placement)
   workspaceTools.ts        Workspace read tools, image_search, directory_search
   workspaceWriteTools.ts   Workspace write tools (drive_manage, drive_share, docs/sheets/slides_edit, *_batch_update, comments)
-  fileTools.ts             send_file and extract_images
+  fileTools.ts             send_file and extract_images (the img_N cache shared with the image tools)
+  imageTools.ts            generate_image / edit_image (Qwen-Image, /images/generations), search_icons / material_icon
   imageSearch.ts           Image search (Model Studio web_search_image, in its own Qwen request)
   webTools.ts              DeepSeek Search & Fetch
 src/models/                Sequelize models, each with a static register(sequelize)

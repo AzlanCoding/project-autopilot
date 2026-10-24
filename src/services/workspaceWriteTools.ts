@@ -31,6 +31,8 @@ const summary = (replies: any) => {
 export interface WriteToolOptions {
   /** Downloads a WhatsApp image by media_id (to insert images people sent). */
   getChatMedia?: (mediaId: string) => Promise<ChatMedia>;
+  /** An image Sofia made or pulled out of a file (img_N: generated, icons, extract_images). */
+  getImage?: (id: string) => { buffer: Buffer, mime: string };
 }
 
 /** Tools for changing Sofia's Google Workspace files. Only added when Workspace is signed in. */
@@ -92,6 +94,11 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
         throw Error(`"${file.name}" isn't an image.`);
       }
       fileId = file.id!;
+    }
+    else if (/^img_\d+$/.test(s) && options.getImage) {
+      const image = options.getImage(s);
+      fileId = await uploadTemporaryImage(image.buffer, image.mime, s);
+      uploaded = true;
     }
     else {
       if (!options.getChatMedia) {
@@ -309,7 +316,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       at: z.number().int().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert at this index (the start index of a paragraph from docs_read_structure). [insert_inline, insert_page_break] Any index. Defaults to the end.'),
       start: z.number().int().optional().describe('[delete_range] Start index.'),
       end: z.number().int().optional().describe('[delete_range] End index (not included).'),
-      image: z.string().optional().describe('[insert_image] A public image link, a Drive image link, or a WhatsApp image media_id.'),
+      image: z.string().optional().describe('[insert_image] A public image link, a Drive image link, a WhatsApp image media_id, or img_N (generated image, icon or extracted image).'),
       width_pt: z.number().optional().describe('[Optional for insert_image] Width in points (the page is about 468pt wide), the height keeps the aspect ratio.'),
       table: z.number().int().min(1).optional().describe('[table_*, and insert_image into a cell] Table number, 1 = first.'),
       cells: cellsSchema.describe('[table_set_cells] Cells to set.'),
@@ -612,7 +619,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       layout: z.string().optional().describe("[Optional for add_slide] A layout name from the deck (see slides_read), or one of TITLE, TITLE_AND_BODY, TITLE_ONLY, SECTION_HEADER, TITLE_AND_TWO_COLUMNS, BIG_NUMBER, BLANK."),
       title: z.string().optional().describe('[Optional for add_slide]'), body: z.string().optional().describe('[Optional for add_slide]'),
       position: z.number().int().min(1).optional().describe('[Optional for add_slide, duplicate_slide; required for move_slide] Slide position, 1 = first.'),
-      image: z.string().optional().describe('[insert_image]'),
+      image: z.string().optional().describe('[insert_image] A public image link, a Drive image link, a WhatsApp image media_id, or img_N (generated image, icon or extracted image).'),
       x: z.number().optional(), y: z.number().optional(), width: z.number().optional(), height: z.number().optional(),
       from_url: z.string().optional().describe("[Optional for copy_image] The deck to copy from, defaults to this one."),
       from_slide: z.string().optional().describe('[copy_image] The slide to copy from.'),

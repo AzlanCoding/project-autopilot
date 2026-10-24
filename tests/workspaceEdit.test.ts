@@ -112,7 +112,10 @@ function workspace(files: { [id: string]: any }, overrides: any = {}) {
     },
   };
   const ws = new GoogleWorkspace(undefined, clients);
-  const tools = Object.fromEntries(createWorkspaceWriteTools(ws, { getChatMedia: async () => ({ buffer: Buffer.from('png'), mime: 'image/png', kind: 'image' }) }).map(t => [t.name, t]));
+  const tools = Object.fromEntries(createWorkspaceWriteTools(ws, {
+    getChatMedia: async () => ({ buffer: Buffer.from('png'), mime: 'image/png', kind: 'image' }),
+    getImage: (id: string) => { if (id != 'img_1') throw Error(`${id} isn't available any more`); return { buffer: Buffer.from('generated'), mime: 'image/png' }; },
+  }).map(t => [t.name, t]));
   return { tools, calls };
 }
 
@@ -285,4 +288,14 @@ test('writing to a multi-tab sheet needs the tab, and a chip after a label gets 
     { insertText: { location: { index: 5, tabId: 't.0' }, text: ' ' } },
     { insertPerson: { location: { index: 6, tabId: 't.0' }, personProperties: { email: 'azlan@nyp-gdg.com' } } },
   ]);
+});
+
+test('a generated image (img_N) is inserted from a temporary Drive copy, which is deleted', async () => {
+  const doc = { id: LONG('doc'), name: 'Proposal', mimeType: MIME.doc };
+  const { tools, calls } = workspace({ [doc.id]: doc });
+  await tools.docs_edit.invoke({ url: doc.id, action: 'insert_image', image: 'img_1' });
+  assert.match(calls.find(c => c.startsWith('files.create'))!, /\[Sofia temporary image\] img_1/);
+  assert.match(calls.find(c => c.startsWith('docs.batchUpdate'))!, /lh3\.googleusercontent\.com\/d\/upload1/);
+  assert.match(last(calls), /^files\.delete .*"fileId":"upload1"/);
+  await assert.rejects(tools.docs_edit.invoke({ url: doc.id, action: 'insert_image', image: 'img_9' }), /img_9 isn't available any more/);
 });

@@ -45,5 +45,9 @@ export function builtinToolsFor(useWebTools: boolean, provider: 'modelstudio' | 
   return useWebTools && provider == 'modelstudio' ? ['web_search', 'web_extractor'] : [];
 }
 
+// Model Studio models for generate_image / edit_image: standard, and "pro" (slower, better text and detail)
+export const IMAGE_MODEL = process.env.IMAGE_MODEL || 'qwen-image-3.0';
+export const IMAGE_MODEL_PRO = process.env.IMAGE_MODEL_PRO || 'qwen-image-3.0-pro';
+
 // Model Studio model used for describing stickers. Falls back to CHAT_MODEL only if that is a Model Studio model.
 export const STICKER_PROCESSING_MODEL = process.env.STICKER_PROCESSING_MODEL || (CHAT_PROVIDER == 'modelstudio' ? CHAT_MODEL : 'qwen3.8-flash');

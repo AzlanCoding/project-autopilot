@@ -37,6 +37,7 @@ import { isDriveId, toGoogleLink } from '../utils/googleUrls';
 import { createWorkspaceReadTools } from './workspaceTools';
 import { createWorkspaceWriteTools } from './workspaceWriteTools';
 import { createFileTools, ExtractedImages } from './fileTools';
+import { createImageTools } from './imageTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
@@ -196,8 +197,9 @@ export default class AI {
   /** Sofia's Google Workspace account, set when it's signed in (`pnpm google-auth`). */
   workspace?: GoogleWorkspace;
   workspaceTools: ExtendedDynamicStructuredTool[] = [];
-  /** Images from `extract_images`, by id (img_1...). */
+  /** Images from `extract_images`, generate_image, edit_image and material_icon, by id (img_1...). */
   extractedImages = new ExtractedImages();
+  imageTools: ExtendedDynamicStructuredTool[] = [];
 
   // Web Tools on DeepSeek (Model Studio's are built-in tools, see `builtinTools`)
   webSearchTool: ExtendedDynamicStructuredTool;
@@ -778,12 +780,20 @@ export default class AI {
       this.workspaceTools = [
         ...createWorkspaceReadTools(this.workspace),
         // WhatsApp images (by media_id) can be inserted once the chat tools are registered
-        ...createWorkspaceWriteTools(this.workspace, { getChatMedia: id => this.chatAdapter!.getMedia(id) }),
+        ...createWorkspaceWriteTools(this.workspace, { getChatMedia: id => this.chatAdapter!.getMedia(id), getImage: id => this.extractedImages.get(id) }),
       ];
     }
 
+    // Image generation/editing (Qwen-Image) and Material icons; results go in extractedImages (img_N)
+    this.imageTools = createImageTools({
+      extracted: this.extractedImages, workspace: this.workspace,
+      getChatMedia: id => this.chatAdapter!.getMedia(id),
+      onImages: (count, model) => this.logger.info(`Made ${count} image${count == 1 ? '' : 's'} with ${model}`),
+    });
+
     this.tools = [
       ...(this.useWebTools && this.chatProvider == 'deepseek' ? [this.webSearchTool, this.webFetchTool] : []),
+      ...this.imageTools,
       ...this.workspaceTools,
       this.getCurrentTimeTool,
       this.memoryWriteTool, this.memoryUpdateTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
