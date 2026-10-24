@@ -34,6 +34,7 @@ import { formatPage, formatSearchResults, webFetch, webSearch } from './webTools
 import { WORKSPACE_ENABLED } from '../config/googleWorkspace';
 import { GoogleWorkspace, MIME } from './googleWorkspace';
 import { createWorkspaceReadTools } from './workspaceTools';
+import { createWorkspaceWriteTools } from './workspaceWriteTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
@@ -761,7 +762,11 @@ export default class AI {
 
     if (WORKSPACE_ENABLED) {
       this.workspace = new GoogleWorkspace(this.logger);
-      this.workspaceTools = createWorkspaceReadTools(this.workspace);
+      this.workspaceTools = [
+        ...createWorkspaceReadTools(this.workspace),
+        // WhatsApp images (by media_id) can be inserted once the chat tools are registered
+        ...createWorkspaceWriteTools(this.workspace, { getChatMedia: id => this.chatAdapter!.getMedia(id) }),
+      ];
     }
 
     this.tools = [

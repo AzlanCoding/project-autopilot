@@ -116,6 +116,14 @@ export class GoogleWorkspace {
     return `"${file.name}" (${fileKind(file.mimeType)}${file.modifiedTime ? `, modified ${formatDateTime(Date.parse(file.modifiedTime))}` : ''}${owner}, you ${access})\n${file.webViewLink ?? ''}`;
   }
 
+  private email?: string;
+
+  /** Sofia's own email address, e.g. for checking she owns a file. */
+  async me(): Promise<string> {
+    this.email ??= (await this.call(() => this.api.drive.about.get({ fields: 'user(emailAddress)' }))).user?.emailAddress ?? '';
+    return this.email;
+  }
+
   // ---------- Docs ----------
 
   async getDoc(id: string): Promise<docs_v1.Schema$Document> {
