@@ -221,3 +221,70 @@ test('message breaks skip code blocks, one line monospace and empty messages', (
   // The unfinished check judges the last message as sent, not the last paragraph inside a code block
   assert.equal(replyEnding("Here it is:\n\n```\nline 1\n\nline 2\n```"), '```\nline 1\n\nline 2\n```');
 });
+
+const reasoning = (text: string, id = 'r1') => ({ type: 'reasoning', id, summary: [{ type: 'summary_text', text }] });
+const arrived = [
+  { role: 'system', content: 'New messages arrived while you were replying.', type: 'message' },
+  { role: 'user', content: 'Azlan:\nas in for tier 4', type: 'message' },
+] as any[];
+
+/** Runs a reply where `hasNewMessages` returns the given answers in order (then false), logging what is sent. */
+async function runInterrupted(ai: AI, answers: boolean[], newMessages: () => any[] = () => arrived) {
+  const sent: string[] = [];
+  let checks = 0;
+  for await (const y of ai.processChatv3([{ role: 'user', content: 'Azlan:\nwhy not sign in with Google?', type: 'message' }], undefined, {},
+    async () => newMessages(), () => answers[checks++] ?? false)) {
+    if (y.type == 'chunk_display') sent.push(y.content as string);
+  }
+  return sent;
+}
+
+const summary = (items: any[]) => items.map((i: any) => i.type == 'message' ? `${i.role}: ${i.content}` : i.type);
+
+test('a message that arrives while Sofia is thinking stops the response before any text is sent, keeping her thinking', async () => {
+  const { ai, requests } = fakeAI([
+    [reasoning('Plan a reply about Google sign-in'), message('A whole reply that ignores tier 4')],
+    [message('For tier 4, use real Google sign-in')],
+  ]);
+  assert.deepEqual(await runInterrupted(ai, [true]), ['For tier 4, use real Google sign-in']);
+  assert.deepEqual(summary(requests[1]), ['user: Azlan:\nwhy not sign in with Google?', 'reasoning', ...summary(arrived)]);
+  assert.equal(requests[1][1].summary[0].text, 'Plan a reply about Google sign-in');
+});
+
+test('a message that arrives mid-text stops after the WhatsApp message being sent, and only sent text is kept', async () => {
+  const { ai, requests } = fakeAI([
+    [{ ...message('Yes, do Google!\n\nKeep the secret server-side\n\nAnd publish the consent screen'), chunks: ['Yes, do Google!\n\n', 'Keep the secret server-side\n\n', 'And publish the consent screen'] }],
+    [message('Oh, for tier 4 specifically: mint your own short session')],
+  ]);
+  assert.deepEqual(await runInterrupted(ai, [false, true]), ['Yes, do Google!', 'Keep the secret server-side', 'Oh, for tier 4 specifically: mint your own short session']);
+  const history = summary(requests[1]);
+  assert.deepEqual(history.slice(1, 3), ['assistant: Yes, do Google!\n\nKeep the secret server-side', `system: ${(requests[1][2] as any).content}`]);
+  assert.match(history[2], /were already sent/);
+  assert.deepEqual(history.slice(3), summary(arrived));
+});
+
+test('a message that arrives during tool calls stops after the tool that has run, the rest are not run', async () => {
+  const calls: string[] = [];
+  const { ai, requests } = fakeAI([
+    [call('memory_write', { text: 'google login' }), call('send_sticker_gif', { sticker_id: 'stk_1', end_message: false })],
+    [message('Saved! And for tier 4...')],
+  ], [fakeTool('send_sticker_gif', calls)]);
+  assert.deepEqual(await runInterrupted(ai, [true]), ['Saved! And for tier 4...']);
+  assert.deepEqual(calls, [], 'the sticker was never sent');
+  assert.deepEqual(summary(requests[1]).slice(1), ['function_call', 'function_call_output', ...summary(arrived)]);
+});
+
+test('a reply is stopped at most twice, and not at all if no new messages are returned', async () => {
+  const { ai, requests } = fakeAI([
+    [reasoning('1'), message('never sent')],
+    [reasoning('2'), message('never sent either')],
+    [reasoning('3'), message('Finally replying')],
+  ]);
+  assert.deepEqual(await runInterrupted(ai, [true, true, true, true]), ['Finally replying']);
+  assert.equal(requests.length, 3);
+
+  // e.g. in a group chat, where the new messages weren't meant for Sofia
+  const quiet = fakeAI([[reasoning('1'), message('Normal reply')]]);
+  assert.deepEqual(await runInterrupted(quiet.ai, [true], () => []), ['Normal reply']);
+  assert.equal(quiet.requests.length, 1);
+});

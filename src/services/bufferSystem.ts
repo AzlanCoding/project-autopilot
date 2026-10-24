@@ -16,6 +16,8 @@ interface ChatBuffer {
   func: () => Promise<void>;
   /** Latest call received while RUNNING, run again once the current run finishes. */
   pending?: () => Promise<void>;
+  /** A message arrived while RUNNING that the running reply hasn't been told about yet, see `takeNewMessages`. */
+  newWhileRunning?: boolean;
   firstQueuedAt: number;
   lastUpdate: number;
 }
@@ -49,6 +51,7 @@ export class BufferSystem {
     else if (buffer.status == 'RUNNING') {
       this.logger.info("Buffer already running! Will run again after for " + id);
       buffer.pending = func;
+      buffer.newWhileRunning = true;
       return;
     }
     else {
@@ -57,6 +60,19 @@ export class BufferSystem {
       buffer.lastUpdate = now;
     }
     this.schedule(id);
+  }
+
+  /**
+   * Whether a message arrived in a chat since its reply started (or since the last call), so the running reply can stop
+   * and take it into account. The pending run still happens afterwards and finds nothing unseen if it was handled.
+   */
+  takeNewMessages(id: string): boolean {
+    const buffer = this.chatBuffers[id];
+    if (buffer?.status != 'RUNNING' || !buffer.newWhileRunning) {
+      return false;
+    }
+    buffer.newWhileRunning = false;
+    return true;
   }
 
   /**
@@ -141,6 +157,7 @@ export class BufferSystem {
           const now = getTime();
           buffer.func = buffer.pending;
           buffer.pending = undefined;
+          buffer.newWhileRunning = false;
           buffer.status = 'WAITING';
           buffer.firstQueuedAt = now;
           buffer.lastUpdate = now;

@@ -77,6 +77,9 @@ const isToolImageResult = (r: any): r is ToolImageResult => !!r && typeof r == '
 
 /** Tools that end Sofia's reply: `end_message`, and send tools called with `end_message: true`. */
 const endsReply = (name: string, args: any) => name == 'end_message' || args?.end_message === true;
+/** A reply can be stopped for new messages this many times (see `processChatv3`'s `hasNewMessages`). */
+const MAX_INTERRUPTS = 2;
+const INTERRUPTED_NOTE = "Your reply was stopped after the messages above (they were already sent) because new messages arrived. Continue your reply taking them into account, don't repeat what you already sent.";
 
 export interface ScheduledTaskRunOptions {
   /** Whether the model must send a message with send_message. Defaults to true. */
@@ -1345,12 +1348,16 @@ ${await message()}`,
   /**
    * @param getNewMessages Called after tool calls, before the model continues. Returns messages that arrived in the chat
    * since the reply started (with a note), which are added to the history so Sofia can answer them in the same reply.
+   * @param hasNewMessages Whether a message arrived since the reply started (or since the last call). Checked when Sofia
+   * finishes thinking, sends a WhatsApp message or runs a tool: if so, the response is stopped there and the next one
+   * continues with the new messages (from `getNewMessages`) added, so she doesn't send a reply that ignores them.
    */
   async * processChatv3(
     chatHistory: Array<ResponseInputItem>,
     userInput?: string,
     additionalOptions: Partial<ResponseCreateParamsStreaming> = {},
-    getNewMessages?: () => Promise<ResponseInputItem[]>
+    getNewMessages?: () => Promise<ResponseInputItem[]>,
+    hasNewMessages?: () => boolean
   ) {
     // Add user message to history if provided
     if (userInput) {
@@ -1423,6 +1430,24 @@ ${await message()}`,
       let ended = false;
       // Sofia gets one nudge per reply when she says she's about to do something but stops without a tool call
       let nudged = false;
+      // Times this reply was stopped for new messages, capped so a busy chat can't keep cutting her off
+      let interrupts = 0;
+
+      // Messages to continue with if new ones arrived, checked at points where stopping the response loses nothing:
+      // after thinking, a sent WhatsApp message or a tool call that has run (never halfway through one)
+      const takeInterrupt = async (instance: AI): Promise<ResponseInputItem[] | null> => {
+        if (ended || interrupts >= MAX_INTERRUPTS || !hasNewMessages?.()) {
+          return null;
+        }
+        try {
+          const newMessages = await getNewMessages?.() ?? [];
+          return newMessages.length ? newMessages : null;
+        }
+        catch (e) {
+          instance.logger.error(e, 'Failed to load messages that arrived during the reply');
+          return null;
+        }
+      };
 
       // // Helper to flush buffer as chunk_display
       // const flushBuffer = (delimiter: boolean) => {
@@ -1455,6 +1480,11 @@ ${await message()}`,
         let responseText = "";
         // Images from tools (`view_media`), added after this turn's tool outputs
         const images: EasyInputMessage[] = [];
+        // Text of the current message item already sent to WhatsApp, kept in the history if the response is stopped mid-text
+        let sentText = "";
+        // Set when the response is stopped for new messages, these are added before the next response
+        let interrupted: ResponseInputItem[] | null = null;
+        const controller = new AbortController();
         instance.logger.info(chatHistory, "CHAT HISTORY CREATED");
         // Start streaming from the Responses API
         // The official client exposes a streaming helper `client.responses.stream`.
@@ -1475,9 +1505,9 @@ ${await message()}`,
           tool_choice: "auto",
           // You can pass additional options here (e.g., temperature) if desired
           ...additionalOptions
-        });
+        }, { signal: controller.signal });
 
-        for await (const event of stream) {
+        events: for await (const event of stream) {
           instance.logger.trace(event, "CHAT EVENT");
           if (event.type == "response.output_item.done") {
             if (event.item.type == "function_call") {
@@ -1575,8 +1605,13 @@ ${await message()}`,
                 data: outputData
               }
 
+              interrupted = await takeInterrupt(instance);
+              if (interrupted) {
+                break events;
+              }
             }
             else if (event.item.type == 'message') {
+              sentText = "";
               // Keep text Sofia already sent in the history for the request after a tool call. Without it the model thinks
               // it has not replied yet and writes a whole new reply, so the user gets the same answer twice.
               const text = event.item.content.map(c => c.type == 'output_text' ? c.text : '').join('');
@@ -1594,6 +1629,12 @@ ${await message()}`,
               yield {
                 type: "reasoning",
                 data: event.item,
+              }
+
+              // Her thinking is kept (the summary has all of it) so the next response continues from it
+              interrupted = await takeInterrupt(instance);
+              if (interrupted) {
+                break events;
               }
             }
           }
@@ -1614,12 +1655,32 @@ ${await message()}`,
                   content: text,
                   delimiter: true,
                 };
+                sentText += (sentText ? "\n\n" : "") + text;
+
+                interrupted = await takeInterrupt(instance);
+                if (interrupted) {
+                  // The rest of this message item was never sent, only what was is kept
+                  chatHistory.push(
+                    { role: 'assistant', content: sentText, type: 'message' } as EasyInputMessage,
+                    { role: 'system', content: INTERRUPTED_NOTE, type: 'message' } as EasyInputMessage,
+                  );
+                  break events;
+                }
               }
             }
           }
         }
 
         chatHistory.push(...images);
+        if (interrupted) {
+          controller.abort();
+          interrupts++;
+          instance.logger.info(`Stopped the response, continuing with ${interrupted.length} items that arrived during the reply`);
+          buffer = "";
+          chatHistory.push(...interrupted);
+          yield* handleStream(instance);
+          return;
+        }
         if (ended) {
           instance.logger.info('Reply ended by a tool call');
           buffer = "";

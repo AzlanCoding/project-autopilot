@@ -127,3 +127,15 @@ test('a failing call does not leave the buffer stuck', async () => {
   await sleep(200);
   assert.equal(runs.length, 1);
 });
+
+test('takeNewMessages is true once for a message that arrived while running', async () => {
+  const { buffer, call } = setup();
+  call('m1', 300);
+  await sleep(OPTIONS.delayMs + 50); // m1 is running
+  assert.equal(buffer.takeNewMessages(GROUP), false);
+  call('m2');
+  assert.equal(buffer.takeNewMessages(GROUP), true);
+  assert.equal(buffer.takeNewMessages(GROUP), false, 'cleared once taken');
+  await sleep(300); // m1 finished, m2 is waiting to run again
+  assert.equal(buffer.takeNewMessages(GROUP), false, 'only while running');
+});

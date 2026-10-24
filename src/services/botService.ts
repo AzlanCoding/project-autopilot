@@ -337,7 +337,8 @@ export class SofiaBot implements ChatAdapter {
                               role: 'system',
                               content: systemPrompt
                             } as EasyInputMessage, ...(chatHistoryParsed as Array<ResponseInputItem>), ...(replyHint ? [{ role: 'system', content: replyHint } as EasyInputMessage] : [])],
-                              undefined, {}, () => this.messagesDuringReply(msg.key.remoteJid!, msg.key.remoteJidAlt));
+                              undefined, {}, () => this.messagesDuringReply(msg.key.remoteJid!, msg.key.remoteJidAlt),
+                              () => this.bufferSystem.takeNewMessages(msg.key.remoteJid!));
 
                             const replyMsg: WAMessage = {
                               message: {
@@ -499,8 +500,9 @@ export class SofiaBot implements ChatAdapter {
   }
 
   /**
-   * Called by `processChatv3` after tool calls: returns messages sent in the chat since Sofia started replying (with a
-   * note) so she can answer them in the same reply, instead of the queued buffer run replying again afterwards.
+   * Called by `processChatv3` after tool calls, or when it stops a response for new messages: returns messages sent in the
+   * chat since Sofia started replying (with a note) so she can answer them in the same reply, instead of the queued buffer
+   * run replying again afterwards. In group chats they are only returned if `shouldReplyInGroup` would reply to them.
    */
   async messagesDuringReply(chatId: string, chatIdAlt?: string | null): Promise<ResponseInputItem[]> {
     const history = await this.loadChat(chatId, chatIdAlt || undefined);
@@ -509,6 +511,13 @@ export class SofiaBot implements ChatAdapter {
       return [];
     }
     this.markSeen(chatId, history);
+    if (chatId.endsWith('@g.us')) {
+      const decision = await this.shouldReplyInGroup(history, fresh.messages);
+      if (!decision.reply) {
+        this.logger.info(`Not adding messages that arrived during the reply in ${chatId}: ${decision.reason}`);
+        return [];
+      }
+    }
     const [formatted] = await this.db.user.formatAndMergeMessages(fresh.messages, 24);
     const groupNote = chatId.endsWith('@g.us') ? " (in a group chat, only if they're meant for you)" : '';
     return [
