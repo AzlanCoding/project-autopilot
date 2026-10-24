@@ -57,9 +57,8 @@ Structure the message exactly like this:
 *☁️ DevOps & Automation in the Cloud*
 *🔐 Cybersecurity*
 3. Under each heading, one bullet per timetable block, in time order, then any (ELEARN) blocks at the end of the section, keeping every detail from the timetable:
-- *09:00 - 11:50* · IT2122 Applied Deep Learning · LAB02 · Room L.532
-- <Any Additional Info if given>
-4. Blocks marked (ELEARN) have no time. Write them like this, and never give them a time:
+- *09:00 - 11:50* · IT2122 Applied Deep Learning · LAB02 · Room L.532 · JOHNL
+4. Blocks marked (ELEARN) have no time. Write them like this, and never give them a time, don't include the lecturer:
 - IT2121 Responsible AI for Sustainability · LEC01 · e-learning
 5. If a section has no blocks today, write exactly:
 - No lessons for today

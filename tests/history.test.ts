@@ -62,7 +62,7 @@ test('tool results saved with created_at are stamped with their exact time', asy
     { data: call('list_scheduled_tasks', 'c1'), createdAt: new Date('2026-10-12T10:11:45+08:00') },
     { data: output('c1', '[]'), createdAt: new Date('2026-10-12T10:11:46+08:00') },
   ]]]);
-  const [window] = await users.formatAndMergeMessages([msg('u1', 'azlan', 0, 'tasks?'), msg('a2', 'AI', 1, 'checking')], 12);
+  const [window] = await users.formatAndMergeMessages([msg('u1', 'azlan', 0, 'tasks?'), msg('a2', 'AI', 1, 'checking')], 24);
   assert.equal(window[3].type, 'function_call_output');
   assert.equal((window[3] as any).output, '[Result from 12/10/2026, Mon (10:11:46), it may be out of date now] []');
 });

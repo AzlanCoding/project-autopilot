@@ -487,10 +487,10 @@ export class SofiaBot implements ChatAdapter {
     const firstUnseen = history.findIndex(m => unseenSet.has(m));
     const interleaved = firstUnseen >= 0 && history.slice(firstUnseen).some(m => m.user == 'AI');
     if (!interleaved) {
-      return this.db.user.formatAndMergeMessages(history, 12); // Limit to 12 messages.
+      return this.db.user.formatAndMergeMessages(history, 24); // Limit to 24 messages.
     }
-    const [earlier] = await this.db.user.formatAndMergeMessages(history.filter(m => !unseenSet.has(m)), 12);
-    const [later, lastMsgId] = await this.db.user.formatAndMergeMessages(unseen, 12);
+    const [earlier] = await this.db.user.formatAndMergeMessages(history.filter(m => !unseenSet.has(m)), 24);
+    const [later, lastMsgId] = await this.db.user.formatAndMergeMessages(unseen, 24);
     return [[
       ...earlier,
       { role: 'system', content: "The messages below were sent while you were still replying, so you hadn't seen them yet.", type: 'message' } as EasyInputMessage,
@@ -509,7 +509,7 @@ export class SofiaBot implements ChatAdapter {
       return [];
     }
     this.markSeen(chatId, history);
-    const [formatted] = await this.db.user.formatAndMergeMessages(fresh.messages, 12);
+    const [formatted] = await this.db.user.formatAndMergeMessages(fresh.messages, 24);
     const groupNote = chatId.endsWith('@g.us') ? " (in a group chat, only if they're meant for you)" : '';
     return [
       { role: 'system', content: `New messages arrived while you were replying. You haven't responded to them yet. Answer them in this reply if they need it${groupNote}.`, type: 'message' } as EasyInputMessage,

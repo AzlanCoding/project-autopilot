@@ -29,20 +29,20 @@ test('a prompt change is noted where it happened in the history', async () => {
   const users = await setup();
   const [history] = await users.formatAndMergeMessages([
     msg('azlan', '11:00', 'hi'), msg('AI', '11:01', 'hello ---'), msg('azlan', '12:30', 'thanks'),
-  ], 12);
+  ], 24);
   assert.deepEqual(summarise(history), ['user: azlan:', 'assistant: hello ---', 'NOTE', 'user: azlan:']);
   assert.match((history[2] as any).content, /updated at 10\/10\/2026.*\(12:00:00\)\. What changed: No --- dividers\./);
 });
 
 test('a prompt change after the last message is noted at the end, before the reply', async () => {
   const users = await setup();
-  const [history] = await users.formatAndMergeMessages([msg('azlan', '11:00', 'hi'), msg('AI', '11:01', 'hello')], 12);
+  const [history] = await users.formatAndMergeMessages([msg('azlan', '11:00', 'hi'), msg('AI', '11:01', 'hello')], 24);
   assert.deepEqual(summarise(history), ['user: azlan:', 'assistant: hello', 'NOTE']);
 });
 
 test('no note when every message came after the change, or the change is outside the history window', async () => {
   const users = await setup();
-  const [after] = await users.formatAndMergeMessages([msg('azlan', '12:30', 'hi'), msg('AI', '12:31', 'hello')], 12);
+  const [after] = await users.formatAndMergeMessages([msg('azlan', '12:30', 'hi'), msg('AI', '12:31', 'hello')], 24);
   assert.deepEqual(summarise(after), ['user: azlan:', 'assistant: hello']);
   const [windowed] = await users.formatAndMergeMessages([
     msg('azlan', '11:00', 'old'), msg('AI', '11:01', 'old reply'), msg('azlan', '12:30', 'a'), msg('AI', '12:31', 'b'),
