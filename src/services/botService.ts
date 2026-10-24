@@ -374,7 +374,7 @@ export class SofiaBot implements ChatAdapter {
                                 await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
                               } else if (yieldState.type === 'done') {
                                 break; // Exit the loop after the full content is collected
-                              } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'reasoning') {
+                              } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'builtin_tool_call' || yieldState.type == 'reasoning') {
                                 if (!lastMsgId) {
                                   this.logger.error("ERROR: No Last Message ID, Tool call and reasoning data not saved!");
                                 }

@@ -105,6 +105,12 @@ shown when a call fails). The zod schema is sent as JSON Schema with `strict: tr
   `send_poll`, `read_poll`) are created in `registerChatTools(adapter)` and pushed onto `this.tools`.
 - `ChatAdapter` is implemented by `SofiaBot`, by `MockChatAdapter` in `cli.ts`, and by inline fakes in
   `tests/sendMessage.test.ts` and `tests/polls.test.ts`. Change all of them when you change the interface.
+- Model Studio's built-in tools (`code_interpreter`, `web_search`, `web_extractor`, set by `BUILTIN_TOOLS` in
+  `src/config/modelStudio.ts`, off by default) are sent alongside the function tools. Their instructions are added to
+  the prompt at runtime by `builtinToolsPrompt()` (not in system.md) so Sofia is only told about the ones she has. Alibaba runs them within the response, so their
+  items (`web_search_call`, `web_extractor_call`, `code_interpreter_call`) arrive already done: `processChatv3` keeps
+  them in the history and yields them as `builtin_tool_call` (saved to `ToolCallHist`). They only work on the Responses
+  API; Chat Completions' `enable_code_interpreter` can't be combined with function tools.
 - Follow the existing descriptions: say when to use the tool, mark arguments `[Required]` / `[Optional]`, give dates as
   ISO 8601 in Singapore time with an example (`2026-04-16T11:47:12+08:00`), and return readable text or JSON with dates
   formatted by `formatDateTime`.
@@ -146,7 +152,10 @@ shown when a call fails). The zod schema is sent as JSON Schema with `strict: tr
   - The Responses API silently drops base64 `input_video` parts on `qwen3.8-flash`, so `vision.ts` uses Chat Completions
     (`video_url`). Base64 videos must be under 10MB once encoded.
   - The decision model is only on the workspace URL (`MODELSTUDIO_WORKSPACE_URL`), not the shared dashscope host.
-  - Qwen's thinking is returned in full in the reasoning item's `summary`, and it is passed back in the next request.
+  - Qwen returns its thinking in full in the reasoning item's `summary`, DeepSeek leaves `summary` empty and uses
+    `content`. Both are passed back in the next request.
+  - Failed requests (e.g. an unknown model id) arrive as a `response.failed` event, not an HTTP error. Model ids are
+    case-sensitive (`deepseek-v4.1-flash-1017`, not `DeepSeek-V4.1-Flash-1017`).
   - Aborting a streamed response (`AbortController`) ends the `for await` quietly, it doesn't throw. Check `signal.aborted`.
   - `tool_choice: "required"` only works with a single tool, which is why the unfinished-reply nudge exists.
 - **Text already sent can't be taken back.** Anything yielded as `chunk_display` is on WhatsApp. Keep it in the history

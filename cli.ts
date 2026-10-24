@@ -13,7 +13,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import readline from 'readline';
 import pino from 'pino';
-import AI, { ChatAdapter, ChatMedia } from './src/services/ai';
+import AI, { ChatAdapter, ChatMedia, describeBuiltinToolCall } from './src/services/ai';
 import type { Sticker } from './src/models/Sticker';
 import { chatContext } from './src/services/chatContext';
 import Store from './src/services/store';
@@ -174,6 +174,9 @@ const main = async () => {
             else if (state.type == 'tool_call') {
               const data = (state as any).data as ResponseFunctionToolCall;
               console.log(`🔧 ${data.name}(${data.arguments})`);
+            }
+            else if (state.type == 'builtin_tool_call') {
+              console.log(`🌐 ${describeBuiltinToolCall((state as any).data)}`);
             }
             else if (state.type == 'tool_call_output') {
               const output = String((state as any).data.output);

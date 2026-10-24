@@ -2,26 +2,34 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pino from 'pino';
 import { z } from 'zod';
-import AI from '../src/services/ai';
+import AI, { describeBuiltinToolCall } from '../src/services/ai';
 import { replyEnding, UNFINISHED_NUDGE } from '../src/services/unfinishedReply';
 import { messageBreakIndex, splitIntoMessages } from '../src/utils/common';
 
 /** Builds an AI instance with a fake Responses API that streams `turns` (one list of output items per request). */
 function fakeAI(turns: any[][], extraTools: any[] = []) {
   const requests: any[][] = [];
+  /** The `tools` sent with each request */
+  const toolsSent: any[][] = [];
   const ai = Object.create(AI.prototype) as AI;
   Object.assign(ai, {
     logger: pino({ level: 'silent' }),
     memoryQueryTool: { func: async () => '[]' },
     aboutToAct: async () => 0, // Never nudge unless a test says so
+    builtinTools: [],
     tools: [{ name: 'memory_write', description: 'Save a memory', schema: z.object({ text: z.string() }), invoke: async () => 'Memory saved.' }, ...extraTools],
     openai: {
       responses: {
         create: async (params: any) => {
           requests.push(structuredClone(params.input));
+          toolsSent.push(params.tools);
           const items = turns[requests.length - 1];
           return (async function* () {
             for (const item of items) {
+              if (item.event) {
+                yield item.event; // A raw stream event, e.g. `response.failed`
+                continue;
+              }
               if (item.type == 'message') {
                 // `chunks` streams the text in pieces, like the real API
                 for (const delta of item.chunks ?? [item.content[0].text]) {
@@ -35,7 +43,7 @@ function fakeAI(turns: any[][], extraTools: any[] = []) {
       }
     },
   });
-  return { ai, requests };
+  return { ai, requests, toolsSent };
 }
 
 const message = (text: string) => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
@@ -287,4 +295,63 @@ test('a reply is stopped at most twice, and not at all if no new messages are re
   const quiet = fakeAI([[reasoning('1'), message('Normal reply')]]);
   assert.deepEqual(await runInterrupted(quiet.ai, [true], () => []), ['Normal reply']);
   assert.equal(quiet.requests.length, 1);
+});
+
+test("Sofia's thinking is kept for the next request whether the model puts it in `summary` (Qwen) or `content` (DeepSeek)", async () => {
+  const qwen = { type: 'reasoning', id: 'r1', summary: [{ type: 'summary_text', text: 'Qwen thinks here' }], content: [] };
+  const deepseek = { type: 'reasoning', id: 'r2', summary: [], content: [{ type: 'reasoning_text', text: 'DeepSeek thinks here' }] };
+  const { ai, requests } = fakeAI([
+    [qwen, call('memory_write', { text: 'a' }, 'c1')],
+    [deepseek, call('memory_write', { text: 'b' }, 'c2')],
+    [message('Done!')],
+  ]);
+  assert.deepEqual(await run(ai), ['Done!']);
+  const reasoning = requests[2].filter((i: any) => i.type == 'reasoning');
+  assert.deepEqual(reasoning, [
+    { id: 'r1', summary: qwen.summary, type: 'reasoning' }, // Empty content is left out
+    { id: 'r2', summary: [], content: deepseek.content, type: 'reasoning' },
+  ]);
+});
+
+test('a failed model request (e.g. an unknown model id) throws instead of silently ending the reply', async () => {
+  const { ai } = fakeAI([[
+    { event: { type: 'response.created' } },
+    { event: { type: 'response.failed', response: { error: { code: 'server_error', message: 'Model not found: DeepSeek-V4.1-Flash-1017' } } } },
+  ]]);
+  await assert.rejects(run(ai), /Model request failed \(server_error\): Model not found: DeepSeek-V4.1-Flash-1017/);
+  const errored = fakeAI([[{ event: { type: 'error', code: 'rate_limit', message: 'Too many requests' } }]]);
+  await assert.rejects(run(errored.ai), /Model request failed \(rate_limit\): Too many requests/);
+});
+
+test("Model Studio's built-in tools are off by default", async () => {
+  process.env.ALIBABA_API_KEY ||= 'test'; // The OpenAI client needs a key to be created, no requests are made
+  assert.deepEqual(new AI({} as any, pino({ level: 'silent' })).builtinTools, []); // BUILTIN_TOOLS isn't set in tests
+  const { ai, toolsSent } = fakeAI([[message('Hi!')]]);
+  await run(ai);
+  assert.deepEqual(toolsSent[0].filter((t: any) => t.type != 'function'), []);
+  // Sofia isn't told about tools she doesn't have
+  assert.equal(ai.builtinToolsPrompt(), '');
+  assert.equal(ai.builtinToolsPrompt(['code_interpreter']).includes('web_search'), false);
+  assert.match(ai.builtinToolsPrompt(['web_search', 'web_extractor', 'code_interpreter']), /search the web \(`web_search`\), read web pages \(`web_extractor`\), run Python code/);
+});
+
+test("Model Studio's built-in tools are sent with Sofia's tools when turned on, and their calls are kept in the history and saved", async () => {
+  const search = { type: 'web_search_call', id: 'ws1', status: 'completed', action: { type: 'search', query: 'NYP news October 2026', sources: [] } };
+  const { ai, requests, toolsSent } = fakeAI([
+    [search, message('NYP launched Lumina this month!\n\n'), call('memory_write', { text: 'Azlan follows NYP news' })],
+    [message('Saved that too')],
+  ]);
+  ai.builtinTools = ['code_interpreter', 'web_search', 'web_extractor'];
+  const builtins: any[] = [];
+  const sent: string[] = [];
+  for await (const y of ai.processChatv3([{ role: 'user', content: 'Azlan:\nany NYP news?', type: 'message' }])) {
+    if (y.type == 'builtin_tool_call') builtins.push((y as any).data);
+    if (y.type == 'chunk_display') sent.push(y.content as string);
+  }
+  assert.deepEqual(toolsSent[0].filter((t: any) => t.type != 'function'), [{ type: 'code_interpreter' }, { type: 'web_search' }, { type: 'web_extractor' }]);
+  assert.ok(toolsSent[0].some((t: any) => t.type == 'function' && t.name == 'memory_write'));
+  assert.deepEqual(builtins, [search]); // botService saves these to ToolCallHist
+  assert.deepEqual(sent, ['NYP launched Lumina this month!', 'Saved that too']);
+  assert.deepEqual(summary(requests[1]).slice(1), ['web_search_call', 'assistant: NYP launched Lumina this month!\n\n', 'function_call', 'function_call_output']);
+  assert.equal(describeBuiltinToolCall(search), 'web_search "NYP news October 2026"');
 });

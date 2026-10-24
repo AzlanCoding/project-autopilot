@@ -27,7 +27,7 @@ import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESH
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
-import { CHAT_MODEL, MODELSTUDIO_BASE_URL } from '../config/modelStudio';
+import { BUILTIN_TOOLS, CHAT_MODEL, MODELSTUDIO_BASE_URL } from '../config/modelStudio';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
@@ -81,6 +81,18 @@ const isToolImageResult = (r: any): r is ToolImageResult => !!r && typeof r == '
 const endsReply = (name: string, args: any) => name == 'end_message' || args?.end_message === true;
 /** A reply can be stopped for new messages this many times (see `processChatv3`'s `hasNewMessages`). */
 const MAX_INTERRUPTS = 2;
+/** Output items of Model Studio's built-in tools (see `BUILTIN_TOOLS`). They have already run when they arrive. */
+const BUILTIN_TOOL_ITEMS = new Set(['web_search_call', 'web_extractor_call', 'code_interpreter_call']);
+/** Short description of a built-in tool call for logs and the CLI, e.g. `web_search "NYP news"`. */
+export function describeBuiltinToolCall(item: any): string {
+  if (item.type == 'web_search_call') {
+    return `web_search ${JSON.stringify(item.action?.query ?? '')}`;
+  }
+  if (item.type == 'web_extractor_call') {
+    return `web_extractor ${(item.urls ?? []).join(' ')}`;
+  }
+  return `code_interpreter (${String(item.code ?? '').split('\n').length} lines)`;
+}
 const INTERRUPTED_NOTE = "Your reply was stopped after the messages above (they were already sent) because new messages arrived. Continue your reply taking them into account, don't repeat what you already sent.";
 
 export interface ScheduledTaskRunOptions {
@@ -95,6 +107,8 @@ export default class AI {
   test_mode: boolean = (process.env.TESTING != undefined && process.env.TESTING.toLowerCase() == "true");
   /** How likely the end of a reply says Sofia is about to act without having done it, see `unfinishedReply.ts`. */
   aboutToAct: (text: string) => Promise<number> = aboutToActProbability;
+  /** Model Studio's built-in tools sent with every request, from `BUILTIN_TOOLS` (none by default). */
+  builtinTools: string[] = BUILTIN_TOOLS;
   /** Set by the CLI test harness so the system prompt tells the model it is being tested. */
   cli_mode: boolean = false;
   logger: Logger;
@@ -726,7 +740,7 @@ export default class AI {
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavailable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
       Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-      GROUP CHATS: ${await this.listGroupsTool!.func({})}${this.testModePrompt()}`;
+      GROUP CHATS: ${await this.listGroupsTool!.func({})}${this.builtinToolsPrompt()}${this.testModePrompt()}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
       const chatHistory: ResponseInputItem[] = [{
         role: 'system',
@@ -1498,6 +1512,10 @@ ${await message()}`,
       } | {
         type: 'tool_call_output',
         data: ResponseInputItem.FunctionCallOutput
+      } | {
+        /** A built-in tool (web search, page extraction, code) that Model Studio already ran within the response */
+        type: 'builtin_tool_call',
+        data: any
       }> {
         let hasToolCalls = false;
         // Text of this response, checked for "about to do something" endings when there are no tool calls
@@ -1517,15 +1535,19 @@ ${await message()}`,
           model: CHAT_MODEL,
           input: chatHistory,
           stream: true,
-          tools: instance.tools.map((t) => ({
-            type: "function",
-            name: t.name,
-            description: t.description,
-            parameters: z.toJSONSchema(t.schema as any, {
-              target: 'draft-7',
-            }),
-            strict: true
-          })),
+          tools: [
+            ...instance.tools.map((t) => ({
+              type: "function" as const,
+              name: t.name,
+              description: t.description,
+              parameters: z.toJSONSchema(t.schema as any, {
+                target: 'draft-7',
+              }),
+              strict: true
+            })),
+            // Model Studio's built-in tools, not in the OpenAI SDK's types
+            ...instance.builtinTools.map(type => ({ type }) as any),
+          ],
           tool_choice: "auto",
           // You can pass additional options here (e.g., temperature) if desired
           ...additionalOptions
@@ -1634,6 +1656,20 @@ ${await message()}`,
                 break events;
               }
             }
+            else if (BUILTIN_TOOL_ITEMS.has(event.item.type)) {
+              // Kept so the next request knows what was searched or run (Model Studio accepts them back as input)
+              chatHistory.push(event.item as any);
+              instance.logger.info(`Used ${describeBuiltinToolCall(event.item)}`);
+              yield {
+                type: 'builtin_tool_call',
+                data: event.item
+              }
+
+              interrupted = await takeInterrupt(instance);
+              if (interrupted) {
+                break events;
+              }
+            }
             else if (event.item.type == 'message') {
               sentText = "";
               // Keep text Sofia already sent in the history for the request after a tool call. Without it the model thinks
@@ -1645,9 +1681,12 @@ ${await message()}`,
               }
             }
             else if (event.item.type == 'reasoning') {
+              // Qwen puts its thinking in `summary`, DeepSeek leaves it empty and uses `content`, so both are kept for the
+              // next request (Model Studio accepts both back as input, tested 2026-10-24)
               chatHistory.push({
                 id: event.item.id,
                 summary: event.item.summary,
+                ...(event.item.content?.length ? { content: event.item.content } : {}),
                 type: 'reasoning'
               } as ResponseReasoningItem)
               yield {
@@ -1661,6 +1700,12 @@ ${await message()}`,
                 break events;
               }
             }
+          }
+          else if (event.type == 'response.failed' || event.type == 'error') {
+            // Model Studio reports failed requests (e.g. an unknown model id) as an event, not an HTTP error. Without this
+            // the stream just ends and Sofia silently doesn't reply.
+            const error = event.type == 'error' ? event : event.response.error;
+            throw Error(`Model request failed (${error?.code ?? 'unknown'}): ${error?.message ?? 'no message'}`);
           }
           else if (event.type == "response.output_text.delta") {
             if (ended) {
@@ -1788,6 +1833,26 @@ ${await message()}`,
   }
 
 
+  /**
+   * System prompt text for Model Studio's built-in tools, empty when `BUILTIN_TOOLS` turns them all off. Added at runtime
+   * instead of in system.md so Sofia is never told about tools she doesn't have.
+   */
+  builtinToolsPrompt(tools: string[] = this.builtinTools): string {
+    const can = [
+      tools.includes('web_search') && 'search the web (`web_search`)',
+      tools.includes('web_extractor') && 'read web pages (`web_extractor`)',
+      tools.includes('code_interpreter') && 'run Python code (`code_interpreter`)',
+    ].filter(Boolean);
+    if (can.length == 0) {
+      return '';
+    }
+    const searching = tools.includes('web_search')
+      ? " Search when someone asks about current events, news, or facts you're not sure of, instead of guessing, and keep searches few and focused: they are slow and costly, so don't search for things you already know or for class info (use `get_timetable`, `assignment_list` and your other tools for that)."
+      : '';
+    const coding = tools.includes('code_interpreter') ? ' Use code for maths, calculations and data that need to be exact.' : '';
+    return `\nWeb Search & Code: You can ${can.join(', ')}.${searching}${coding} Summarise what you found in your own words for WhatsApp (no Markdown), and paste at most one or two source links as plain URLs when they help.`;
+  }
+
   /** Extra system prompt text explaining the test environment, empty outside the CLI. */
   testModePrompt(): string {
     if (!this.cli_mode) return '';
@@ -1813,7 +1878,7 @@ ${await message()}`,
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.
-    Additionally, when you use the \`send_message\` tool call, show the user what you're sending in the same response as the tool call.${this.testModePrompt()}`
+    Additionally, when you use the \`send_message\` tool call, show the user what you're sending in the same response as the tool call.${this.builtinToolsPrompt()}${this.testModePrompt()}`
     // Available Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }

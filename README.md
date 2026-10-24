@@ -21,6 +21,7 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Able to reply in a multi-user environment such as group chats.
 *   Automatically send messages to remind the class about upcoming assignments and assessment. Automatically send daily message which is 
 *   Able to retain a universal memory based on conversations with classmates. Related memory is included in the prompt before any conversation or scheduled task starts.
+*   Searches the web, reads web pages and runs Python code with Alibaba Model Studio's built-in tools (`web_search`, `web_extractor`, `code_interpreter`), e.g. for news, the weather or exact calculations. They run on Alibaba's side within one request, and web searches use a lot of tokens (a news question took 46k-111k input tokens against ~5k for a normal reply), so they are off by default: set `BUILTIN_TOOLS` (e.g. `code_interpreter,web_search,web_extractor`) to choose which ones she has.
 *   Sends WhatsApp polls and reads their votes (who voted for what). See *Baileys doesn't decrypt poll votes* under Known Issues.
 *   Sofia will wait for user to finish typing for 3 seconds after a message is received before taking any action. This means that when a message is sent, Sofia should only take action after 3 seconds if no new message was sent or no typing activity was detected. This also attempts to help prevent spam. Note that typing activity detection does not affect this for group chats.
 
