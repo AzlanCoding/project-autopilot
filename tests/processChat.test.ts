@@ -325,14 +325,17 @@ test('a failed model request (e.g. an unknown model id) throws instead of silent
 
 test("Model Studio's built-in tools are off by default", async () => {
   process.env.ALIBABA_API_KEY ||= 'test'; // The OpenAI client needs a key to be created, no requests are made
-  assert.deepEqual(new AI({} as any, pino({ level: 'silent' })).builtinTools, []); // BUILTIN_TOOLS isn't set in tests
+  const real = new AI({} as any, pino({ level: 'silent' })); // USE_WEB_TOOLS isn't set in tests
+  assert.deepEqual(real.builtinTools, []);
+  assert.equal(real.useWebTools, false);
+  assert.equal(real.tools.some(t => t.name == 'web_search' || t.name == 'web_fetch'), false);
   const { ai, toolsSent } = fakeAI([[message('Hi!')]]);
   await run(ai);
   assert.deepEqual(toolsSent[0].filter((t: any) => t.type != 'function'), []);
-  // Sofia isn't told about tools she doesn't have
-  assert.equal(ai.builtinToolsPrompt(), '');
-  assert.equal(ai.builtinToolsPrompt(['code_interpreter']).includes('web_search'), false);
-  assert.match(ai.builtinToolsPrompt(['web_search', 'web_extractor', 'code_interpreter']), /search the web \(`web_search`\), read web pages \(`web_extractor`\), run Python code/);
+  // Sofia isn't told about tools she doesn't have, and is told the right names for the provider
+  assert.equal(real.webToolsPrompt(), '');
+  assert.match(real.webToolsPrompt({ enabled: true, provider: 'modelstudio' }), /search the web \(`web_search`\) and read web pages \(`web_extractor`\)/);
+  assert.match(real.webToolsPrompt({ enabled: true, provider: 'deepseek' }), /search the web \(`web_search`\) and read web pages \(`web_fetch`\)/);
 });
 
 test("Model Studio's built-in tools are sent with Sofia's tools when turned on, and their calls are kept in the history and saved", async () => {
@@ -341,17 +344,27 @@ test("Model Studio's built-in tools are sent with Sofia's tools when turned on, 
     [search, message('NYP launched Lumina this month!\n\n'), call('memory_write', { text: 'Azlan follows NYP news' })],
     [message('Saved that too')],
   ]);
-  ai.builtinTools = ['code_interpreter', 'web_search', 'web_extractor'];
+  ai.builtinTools = ['web_search', 'web_extractor'];
   const builtins: any[] = [];
   const sent: string[] = [];
   for await (const y of ai.processChatv3([{ role: 'user', content: 'Azlan:\nany NYP news?', type: 'message' }])) {
     if (y.type == 'builtin_tool_call') builtins.push((y as any).data);
     if (y.type == 'chunk_display') sent.push(y.content as string);
   }
-  assert.deepEqual(toolsSent[0].filter((t: any) => t.type != 'function'), [{ type: 'code_interpreter' }, { type: 'web_search' }, { type: 'web_extractor' }]);
+  assert.deepEqual(toolsSent[0].filter((t: any) => t.type != 'function'), [{ type: 'web_search' }, { type: 'web_extractor' }]);
   assert.ok(toolsSent[0].some((t: any) => t.type == 'function' && t.name == 'memory_write'));
   assert.deepEqual(builtins, [search]); // botService saves these to ToolCallHist
   assert.deepEqual(sent, ['NYP launched Lumina this month!', 'Saved that too']);
   assert.deepEqual(summary(requests[1]).slice(1), ['web_search_call', 'assistant: NYP launched Lumina this month!\n\n', 'function_call', 'function_call_output']);
   assert.equal(describeBuiltinToolCall(search), 'web_search "NYP news October 2026"');
+});
+
+test('several tool calls in one response are followed by all their results, so DeepSeek keeps the thinking for each call', async () => {
+  const { ai, requests } = fakeAI([
+    [{ type: 'reasoning', id: 'r1', summary: [], content: [{ type: 'reasoning_text', text: 'search, then fetch' }] }, call('memory_write', { text: 'a' }, 'c1'), call('memory_write', { text: 'b' }, 'c2'), message('Saving both\n\n')],
+    [message('Done!')],
+  ]);
+  assert.deepEqual(await run(ai), ['Saving both', 'Done!']);
+  assert.deepEqual(summary(requests[1]).slice(1), ['reasoning', 'function_call', 'function_call', 'function_call_output', 'function_call_output', 'assistant: Saving both\n\n']);
+  assert.deepEqual(requests[1].filter((i: any) => i.type == 'function_call_output').map((i: any) => i.call_id), ['c1', 'c2']);
 });

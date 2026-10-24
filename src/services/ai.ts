@@ -27,7 +27,8 @@ import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESH
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
-import { BUILTIN_TOOLS, CHAT_MODEL, MODELSTUDIO_BASE_URL } from '../config/modelStudio';
+import { BUILTIN_TOOLS, CHAT_API_KEY, CHAT_BASE_URL, CHAT_MODEL, CHAT_PROVIDER, MODELSTUDIO_BASE_URL, USE_WEB_TOOLS } from '../config/modelStudio';
+import { formatPage, formatSearchResults, webFetch, webSearch } from './webTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
@@ -82,7 +83,7 @@ const endsReply = (name: string, args: any) => name == 'end_message' || args?.en
 /** A reply can be stopped for new messages this many times (see `processChatv3`'s `hasNewMessages`). */
 const MAX_INTERRUPTS = 2;
 /** Output items of Model Studio's built-in tools (see `BUILTIN_TOOLS`). They have already run when they arrive. */
-const BUILTIN_TOOL_ITEMS = new Set(['web_search_call', 'web_extractor_call', 'code_interpreter_call']);
+const BUILTIN_TOOL_ITEMS = new Set(['web_search_call', 'web_extractor_call']);
 /** Short description of a built-in tool call for logs and the CLI, e.g. `web_search "NYP news"`. */
 export function describeBuiltinToolCall(item: any): string {
   if (item.type == 'web_search_call') {
@@ -91,7 +92,7 @@ export function describeBuiltinToolCall(item: any): string {
   if (item.type == 'web_extractor_call') {
     return `web_extractor ${(item.urls ?? []).join(' ')}`;
   }
-  return `code_interpreter (${String(item.code ?? '').split('\n').length} lines)`;
+  return item.type;
 }
 const INTERRUPTED_NOTE = "Your reply was stopped after the messages above (they were already sent) because new messages arrived. Continue your reply taking them into account, don't repeat what you already sent.";
 
@@ -109,15 +110,18 @@ export default class AI {
   aboutToAct: (text: string) => Promise<number> = aboutToActProbability;
   /** Model Studio's built-in tools sent with every request, from `BUILTIN_TOOLS` (none by default). */
   builtinTools: string[] = BUILTIN_TOOLS;
+  /** Whether Sofia can search the web and read pages, and through which provider's tools (see `USE_WEB_TOOLS`). */
+  useWebTools: boolean = USE_WEB_TOOLS;
+  chatProvider: 'modelstudio' | 'deepseek' = CHAT_PROVIDER;
   /** Set by the CLI test harness so the system prompt tells the model it is being tested. */
   cli_mode: boolean = false;
   logger: Logger;
   db: Store;
+  // Sofia's chats and scheduled tasks, Model Studio unless `CHAT_BASE_URL` points elsewhere (e.g. DeepSeek)
   openai = new OpenAI(
     {
-      apiKey: process.env.ALIBABA_API_KEY,
-      // baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-      baseURL: MODELSTUDIO_BASE_URL
+      apiKey: CHAT_API_KEY,
+      baseURL: CHAT_BASE_URL
     }
   );
 
@@ -149,6 +153,10 @@ export default class AI {
 
   // Timetable Tool
   timetableTool: ExtendedDynamicStructuredTool;
+
+  // Web Tools on DeepSeek (Model Studio's are built-in tools, see `builtinTools`)
+  webSearchTool: ExtendedDynamicStructuredTool;
+  webFetchTool: ExtendedDynamicStructuredTool;
 
   // Sticker & GIFs Tools
   stickerGifTool: ExtendedDynamicStructuredTool;
@@ -689,7 +697,34 @@ export default class AI {
 
 
     // Register tools (order doesn't matter)
+    this.webSearchTool = new ExtendedDynamicStructuredTool({
+      name: "web_search",
+      description: "Search the web. Returns the top results with their title, link, date and a summary. Use it for current events, news or facts you're not sure of, not for class info (use your other tools for that). Read a result in full with `web_fetch`.",
+      schema: z.object({
+        query: z.string().min(1).max(128).describe("[Required] What to search for, a few keywords. Supports operators like site:nyp.edu.sg, \"exact phrase\", -exclude and after:2026-10-01."),
+        question: z.string().max(128).optional().describe("[Optional] The user's original question, helps find better results."),
+        count: z.number().int().min(1).max(10).optional().describe("[Optional] Number of results, 1-10. Defaults to 5."),
+      }),
+      func: async (args) => {
+        const { query, question, count = 5 } = args as any;
+        return formatSearchResults(await webSearch(query, { count, question }));
+      }
+    }, "{query: string, question?: string, count?: number}");
+
+    this.webFetchTool = new ExtendedDynamicStructuredTool({
+      name: "web_fetch",
+      description: "Read a web page in full (as Markdown), e.g. a result from `web_search` whose summary isn't enough. Only use URLs from `web_search` results or that someone sent, don't guess URLs (guessed ones are usually wrong). To find a page on a particular site, search with site:, e.g. `site:weather.gov.sg 4-day outlook`.",
+      schema: z.object({
+        url: z.string().min(1).describe("[Required] The page's full URL, starting with http:// or https://."),
+      }),
+      func: async (args) => {
+        const { url } = args as any;
+        return formatPage(url, await webFetch(url));
+      }
+    }, "{url: string}");
+
     this.tools = [
+      ...(this.useWebTools && this.chatProvider == 'deepseek' ? [this.webSearchTool, this.webFetchTool] : []),
       this.getCurrentTimeTool,
       this.memoryWriteTool, this.memoryUpdateTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
       this.assignmentCreateTool/*, this.assignmentGetTool*/, this.assignmentListTool, this.assignmentUpdateTool, this.assignmentDeleteTool,
@@ -740,7 +775,7 @@ export default class AI {
       const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
       const memoryPrompt = `Current Chat Mode: System Scheduled Task Mode (GIFs and Stickers unavailable in this mode)\nYour Core Memories: ${JSON.stringify((await this.db.getCoreMemories({})).data)}
       Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
-      GROUP CHATS: ${await this.listGroupsTool!.func({})}${this.builtinToolsPrompt()}${this.testModePrompt()}`;
+      GROUP CHATS: ${await this.listGroupsTool!.func({})}${this.webToolsPrompt()}${this.testModePrompt()}`;
       const systemPrompt = `${systemMessageContent}\nCurrent Time: ${formatDateTime(new Date())}\n${memoryPrompt}`;
       const chatHistory: ResponseInputItem[] = [{
         role: 'system',
@@ -1526,6 +1561,10 @@ ${await message()}`,
         let sentText = "";
         // Set when the response is stopped for new messages, these are added before the next response
         let interrupted: ResponseInputItem[] | null = null;
+        // Results of this response's tool calls, added after its consecutive calls instead of after each one. DeepSeek's own
+        // API rejects call, result, call, result: the second call ends up without the thinking it needs (tested 2026-10-25)
+        const toolOutputs: ResponseInputItem.FunctionCallOutput[] = [];
+        const flushToolOutputs = () => chatHistory.push(...toolOutputs.splice(0));
         const controller = new AbortController();
         instance.logger.info(chatHistory, "CHAT HISTORY CREATED");
         // Start streaming from the Responses API
@@ -1639,13 +1678,7 @@ ${await message()}`,
                 type: 'function_call_output'
               } as ResponseInputItem.FunctionCallOutput
 
-              chatHistory.push(
-                outputData
-                // new ToolMessage({
-                //   content: result,
-                //   tool_call_id: event.item.call_id,
-                // })
-              )
+              toolOutputs.push(outputData);
               yield {
                 type: 'tool_call_output',
                 data: outputData
@@ -1658,6 +1691,7 @@ ${await message()}`,
             }
             else if (BUILTIN_TOOL_ITEMS.has(event.item.type)) {
               // Kept so the next request knows what was searched or run (Model Studio accepts them back as input)
+              flushToolOutputs();
               chatHistory.push(event.item as any);
               instance.logger.info(`Used ${describeBuiltinToolCall(event.item)}`);
               yield {
@@ -1676,6 +1710,7 @@ ${await message()}`,
               // it has not replied yet and writes a whole new reply, so the user gets the same answer twice.
               const text = event.item.content.map(c => c.type == 'output_text' ? c.text : '').join('');
               if (text.trim()) {
+                flushToolOutputs();
                 chatHistory.push({ role: 'assistant', content: text, type: 'message' } as EasyInputMessage);
                 responseText += text;
               }
@@ -1683,6 +1718,7 @@ ${await message()}`,
             else if (event.item.type == 'reasoning') {
               // Qwen puts its thinking in `summary`, DeepSeek leaves it empty and uses `content`, so both are kept for the
               // next request (Model Studio accepts both back as input, tested 2026-10-24)
+              flushToolOutputs();
               chatHistory.push({
                 id: event.item.id,
                 summary: event.item.summary,
@@ -1729,6 +1765,7 @@ ${await message()}`,
                 interrupted = await takeInterrupt(instance);
                 if (interrupted) {
                   // The rest of this message item was never sent, only what was is kept
+                  flushToolOutputs();
                   chatHistory.push(
                     { role: 'assistant', content: sentText, type: 'message' } as EasyInputMessage,
                     { role: 'system', content: INTERRUPTED_NOTE, type: 'message' } as EasyInputMessage,
@@ -1740,6 +1777,7 @@ ${await message()}`,
           }
         }
 
+        flushToolOutputs();
         chatHistory.push(...images);
         if (interrupted) {
           controller.abort();
@@ -1834,23 +1872,15 @@ ${await message()}`,
 
 
   /**
-   * System prompt text for Model Studio's built-in tools, empty when `BUILTIN_TOOLS` turns them all off. Added at runtime
-   * instead of in system.md so Sofia is never told about tools she doesn't have.
+   * System prompt text for the web tools, empty when `USE_WEB_TOOLS` is off. Added at runtime instead of in system.md so
+   * Sofia is never told about tools she doesn't have, and with the tool names of the provider she chats through.
    */
-  builtinToolsPrompt(tools: string[] = this.builtinTools): string {
-    const can = [
-      tools.includes('web_search') && 'search the web (`web_search`)',
-      tools.includes('web_extractor') && 'read web pages (`web_extractor`)',
-      tools.includes('code_interpreter') && 'run Python code (`code_interpreter`)',
-    ].filter(Boolean);
-    if (can.length == 0) {
+  webToolsPrompt({ enabled = this.useWebTools, provider = this.chatProvider }: { enabled?: boolean, provider?: 'modelstudio' | 'deepseek' } = {}): string {
+    if (!enabled) {
       return '';
     }
-    const searching = tools.includes('web_search')
-      ? " Search when someone asks about current events, news, or facts you're not sure of, instead of guessing, and keep searches few and focused: they are slow and costly, so don't search for things you already know or for class info (use `get_timetable`, `assignment_list` and your other tools for that)."
-      : '';
-    const coding = tools.includes('code_interpreter') ? ' Use code for maths, calculations and data that need to be exact.' : '';
-    return `\nWeb Search & Code: You can ${can.join(', ')}.${searching}${coding} Summarise what you found in your own words for WhatsApp (no Markdown), and paste at most one or two source links as plain URLs when they help.`;
+    const read = provider == 'deepseek' ? '`web_fetch`' : '`web_extractor`';
+    return `\nWeb Search: You can search the web (\`web_search\`) and read web pages (${read}). Search when someone asks about current events, news, or facts you're not sure of, instead of guessing, and keep searches few and focused: they are slow and costly, so don't search for things you already know or for class info (use \`get_timetable\`, \`assignment_list\` and your other tools for that). Summarise what you found in your own words for WhatsApp (no Markdown), and paste at most one or two source links as plain URLs when they help.`;
   }
 
   /** Extra system prompt text explaining the test environment, empty outside the CLI. */
@@ -1878,7 +1908,7 @@ ${await message()}`,
     Your Core Memories: ${(await this.db.getCoreMemories({})).data.map(m => m.text).join(';')}
     Available Tool Calls: ${this.tools.map(t => t.name).join(', ')}
     User's can't see you using tool calls, so make sure to send the output of the tool call back to the user if appropriate.
-    Additionally, when you use the \`send_message\` tool call, show the user what you're sending in the same response as the tool call.${this.builtinToolsPrompt()}${this.testModePrompt()}`
+    Additionally, when you use the \`send_message\` tool call, show the user what you're sending in the same response as the tool call.${this.webToolsPrompt()}${this.testModePrompt()}`
     // Available Tool Calls: ${this.tools.map(t => `\`${t.name}\`: ${t.description}, Parameters: ${JSON.stringify(z.toJSONSchema(t.schema as any).properties) || "Not needed"}`).join('\n')}`
     return systemMessageContent + (mode === 'testing' ? `\nCurrent Time:${formatDateTime(new Date())}` : '') + `\n${memoryPrompt}`
   }

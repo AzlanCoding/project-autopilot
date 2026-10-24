@@ -30,6 +30,8 @@ her features (see `notes/sofia-personality.md` and the system prompt).
 - **WhatsApp:** [Baileys](https://github.com/WhiskeySockets/Baileys) `7.0.0-rc14`, with `baileys-bottle-devstroupe` storing the
   session and messages in PostgreSQL (`BAILEYS_BOTTLE_SQL_DATABASE_URL`).
 - **Models:** Alibaba Model Studio through the `openai` SDK on its OpenAI compatible endpoint (`MODELSTUDIO_BASE_URL`).
+  Sofia's chats can instead go to another Responses API provider (`CHAT_BASE_URL` / `CHAT_API_KEY`, e.g. DeepSeek);
+  embeddings, the decision model and sticker descriptions always stay on Model Studio.
   Chat uses the **Responses API**, streamed (`CHAT_MODEL`, default `qwen3.8-flash`). Embeddings are `text-embedding-v4`
   (2048 dims). Group reply and unfinished-reply checks use the decision model (`decision-model-preview`, `/systemone`).
 - **Data:** PostgreSQL through Sequelize (`SQL_DATABASE_URL`), Milvus for vectors (`memories_vectors`, `sticker_vectors`).
@@ -105,12 +107,15 @@ shown when a call fails). The zod schema is sent as JSON Schema with `strict: tr
   `send_poll`, `read_poll`) are created in `registerChatTools(adapter)` and pushed onto `this.tools`.
 - `ChatAdapter` is implemented by `SofiaBot`, by `MockChatAdapter` in `cli.ts`, and by inline fakes in
   `tests/sendMessage.test.ts` and `tests/polls.test.ts`. Change all of them when you change the interface.
-- Model Studio's built-in tools (`code_interpreter`, `web_search`, `web_extractor`, set by `BUILTIN_TOOLS` in
-  `src/config/modelStudio.ts`, off by default) are sent alongside the function tools. Their instructions are added to
-  the prompt at runtime by `builtinToolsPrompt()` (not in system.md) so Sofia is only told about the ones she has. Alibaba runs them within the response, so their
-  items (`web_search_call`, `web_extractor_call`, `code_interpreter_call`) arrive already done: `processChatv3` keeps
-  them in the history and yields them as `builtin_tool_call` (saved to `ToolCallHist`). They only work on the Responses
-  API; Chat Completions' `enable_code_interpreter` can't be combined with function tools.
+- Web tools (`USE_WEB_TOOLS`, off by default) depend on the chat provider (`CHAT_PROVIDER`: DeepSeek when
+  `CHAT_BASE_URL` is `https://api.deepseek.com`, otherwise Model Studio). Their instructions are added to the prompt at
+  runtime by `webToolsPrompt()` (not in system.md) so Sofia is only told about tools she has, with the right names.
+  - **Model Studio:** its built-in `web_search` and `web_extractor` (`BUILTIN_TOOLS`), sent alongside the function
+    tools. Alibaba runs them within the response, so their items (`web_search_call`, `web_extractor_call`) arrive
+    already done: `processChatv3` keeps them in the history and yields them as `builtin_tool_call` (saved to
+    `ToolCallHist`). They only work on the Responses API.
+  - **DeepSeek:** function tools `web_search` and `web_fetch` calling DeepSeek's Search & Fetch APIs
+    (`src/services/webTools.ts`). DeepSeek accepts Model Studio's built-in tools but silently ignores them.
 - Follow the existing descriptions: say when to use the tool, mark arguments `[Required]` / `[Optional]`, give dates as
   ISO 8601 in Singapore time with an example (`2026-04-16T11:47:12+08:00`), and return readable text or JSON with dates
   formatted by `formatDateTime`.
@@ -157,6 +162,9 @@ shown when a call fails). The zod schema is sent as JSON Schema with `strict: tr
   - Failed requests (e.g. an unknown model id) arrive as a `response.failed` event, not an HTTP error. Model ids are
     case-sensitive (`deepseek-v4.1-flash-1017`, not `DeepSeek-V4.1-Flash-1017`).
   - Aborting a streamed response (`AbortController`) ends the `for await` quietly, it doesn't throw. Check `signal.aborted`.
+  - Several tool calls in one response must be followed by all their results (call, call, result, result). DeepSeek's
+    own API rejects call, result, call, result with "The `reasoning_text` in the thinking mode must be passed back".
+    `processChatv3` holds results in `toolOutputs` until the calls end.
   - `tool_choice: "required"` only works with a single tool, which is why the unfinished-reply nudge exists.
 - **Text already sent can't be taken back.** Anything yielded as `chunk_display` is on WhatsApp. Keep it in the history
   (as an assistant message) when changing the reply loop, or Sofia repeats herself.

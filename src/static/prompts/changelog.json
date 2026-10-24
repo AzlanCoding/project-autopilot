@@ -29,6 +29,6 @@
   },
   {
     "date": "2026-10-24T23:25:00+08:00",
-    "summary": "You can now search the web (`web_search`), read web pages (`web_extractor`) and run Python code (`code_interpreter`). Search for current events, news or facts you're not sure of instead of guessing or saying you can't browse, but keep searches few and focused since they're slow and costly, and use your own tools for class info. Use code for exact maths and data. Summarise results for WhatsApp in your own words, with at most one or two plain URLs."
+    "summary": "You can now search the web (`web_search`) and read web pages (see your instructions for the tool name). Search for current events, news or facts you're not sure of instead of guessing or saying you can't browse, but keep searches few and focused since they're slow and costly, and use your own tools for class info. Summarise results for WhatsApp in your own words, with at most one or two plain URLs."
   }
 ]
