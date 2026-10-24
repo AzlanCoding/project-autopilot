@@ -23,6 +23,10 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Able to retain a universal memory based on conversations with classmates. Related memory is included in the prompt before any conversation or scheduled task starts.
 *   Searches the web and reads web pages (`USE_WEB_TOOLS=true`, off by default), e.g. for news or the weather. On Model Studio these are its built-in `web_search` and `web_extractor` tools, run on Alibaba's side within one request (a news question took 46k-111k input tokens against ~5k for a normal reply). When chatting through DeepSeek they are `web_search` and `web_fetch` tools calling DeepSeek's [Search & Fetch APIs](https://api-docs.deepseek.com/guides/search) ($0.75 per 1,000 requests each).
 *   Chats through Alibaba Model Studio by default, or another OpenAI compatible provider with the Responses API by setting `CHAT_BASE_URL`, `CHAT_API_KEY` and `CHAT_MODEL` (e.g. DeepSeek: `https://api.deepseek.com` and `deepseek-flash`, which replied ~2-3x faster than Model Studio's DeepSeek in testing). Embeddings, the group reply decision model and sticker descriptions always use Model Studio.
+*   Helps the GDG on Campus NYP club (GDGoC NYP), which Sofia is a member of, with her own Google Workspace account (`sofia@nyp-gdg.com`): reads, writes and reviews Google Docs (including tables and tabs), Sheets (tabs, merged cells, formatting) and Slides (text, tables, images, copying branding between slides), manages files in the club's shared drive (create, copy, move, rename, trash, convert .docx/.xlsx/.pptx to a Google copy), reads and writes comments, shares files and transfers ownership, finds people's emails in the directory, and finds images and GIFs to insert. She decides from a person's user description whether they're a GDGoC member and only changes club files for members. See *Google Workspace (GDGoC)* below to set it up.
+*   Reads PDFs sent on WhatsApp or stored in Drive (`read_pdf`, page by page) and looks at pages as images (`view_pdf_page`), using poppler.
+*   Sends files and images on WhatsApp (`send_file`): Docs, Sheets and Slides as PDF (or docx/xlsx/pptx), a slide or PDF page as an image, Drive files, and images pulled out of PDFs, Docs and Slides (`extract_images`).
+*   Knows who is in a group chat: the group's description and every participant with their user description are in her prompt, and `get_group_info` shows any group.
 *   Sends WhatsApp polls and reads their votes (who voted for what). See *Baileys doesn't decrypt poll votes* under Known Issues.
 *   Sofia will wait for user to finish typing for 3 seconds after a message is received before taking any action. This means that when a message is sent, Sofia should only take action after 3 seconds if no new message was sent or no typing activity was detected. This also attempts to help prevent spam. Note that typing activity detection does not affect this for group chats.
 
@@ -32,7 +36,6 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Should maintain an internal collection of stickers and GIFs. Only approved stickers and GIFs can be used. Adding and approving of stickers and GIFs can be done through the web console. Web console should also allow for adding additional description for GIFs and stickers so that searching would be easier.
 *   Able to send GIFs and stickers at the end of messages when replying to a student. Where appropriate, sofia should also be only reply with a sticker or gif. (e.g., Instead of saying thank you, sofia should send a gif or sticker that has thank you in it.)
 *   Able to add stickers to internal collection used by other students when received, however, they need to be approved first before they can be used.
-*   Able to process pdf documents.
 *   Able to schedule reminders automatically (E.g., user asks sofia to remind them to do something in the morning)
   
 
@@ -56,6 +59,22 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Web UI: set `WEBUI_PASSWORD` in `.env` (and optionally `WEBUI_PORT`, default 3000) to manage Sofia's stickers and GIFs (including importing many at once) and her users (`UserStore`). It listens on localhost only, so open it through SSH port forwarding (`ssh -L 3000:localhost:3000 ...`) at http://localhost:3000 and log in with any username and the password. Uploads are approved straight away, stickers and GIFs Sofia receives wait as pending until approved. Files are stored in `assets/stickers/`, approved descriptions are embedded in the `sticker_vectors` Milvus collection for `search_sticker_gif`. Needs `ffmpeg` (included in the Docker image) for GIFs. Sofia can't view videos unless `ENABLE_VIDEO=true` is set, since viewing one downloads the whole file just to show her the first frame (GIFs can always be viewed).
 *   Docker: `docker compose up -d --build` starts Milvus and the bot (if Milvus is not ready yet, the bot exits and Docker restarts it), then scan the QR code from `docker compose logs -f sofia`. Everything restarts unless stopped. `.env` and `assets/` are mounted into the container.
 
+
+## Google Workspace (GDGoC)
+Sofia uses her own account, `sofia@nyp-gdg.com` (Google Workspace Essentials Starter, free), with the Drive, Docs, Sheets, Slides and People APIs (all free). The Workspace tools are only added once she's signed in.
+
+1.  In Google Cloud, signed in with an `nyp-gdg.com` admin account: create a project in the `nyp-gdg.com` organisation, enable the **Google Drive, Docs, Sheets, Slides and People APIs**, and set up the consent screen as **Internal** (or External and **published to production**, not Testing, whose tokens expire after 7 days). Add the scopes `.../auth/drive` and `.../auth/directory.readonly`. Create an OAuth client of type **Desktop app** and save its JSON as `assets/workspace_client_secret.json`.
+2.  Add `sofia@nyp-gdg.com` to the club's shared drive as a **Content manager**. In the admin console, keep contact sharing on (Directory → Directory settings → Sharing settings) for `directory_search`, and allow link sharing (Apps → Google Workspace → Drive and Docs) so private images can be inserted.
+3.  Run `pnpm google-auth`, open the link and sign in as Sofia. It saves `assets/google-workspace-token.json` and lists the shared drives with their ids: set `GDG_SHARED_DRIVE_ID` in `.env` to the club's (new files go there). `pnpm google-auth --check` tests the token. Over SSH, paste the address the browser ends up on (`http://127.0.0.1:...`) into the terminal.
+4.  Put "GDGoC member" in the description of club members in the web UI's user list, so Sofia knows who can ask her to change club files.
+
+How it works and its limits:
+*   Reading gives Sofia Markdown or a structure view with the ids and positions she needs to edit: Doc paragraphs and table cells with their character indices, Sheet grids with merged cells, every element on a slide. Common edits have tools (`docs_edit`, `sheets_edit`, `slides_edit`); anything else goes through `docs_batch_update`, `sheets_batch_update` and `slides_batch_update`, the APIs' own requests.
+*   Docs and Slides can only insert images from public links. Images that aren't public (sent on WhatsApp, or a Drive file such as a logo) are shared by link only while they're inserted, then unshared. Sheets shows images with `=IMAGE(link)`, which needs a link that stays public.
+*   Image search uses Model Studio's `web_search_image` in a separate request to `qwen3.8-flash` (`IMAGE_SEARCH_MODEL`), because DeepSeek models don't support it. Each search takes about 20 seconds. Tenor's GIF API was shut down in June 2026, so GIFs come from image search too.
+*   The Docs and Sheets APIs only work on Google files, so `.docx`, `.xlsx` and `.pptx` files are read through a temporary converted copy (deleted afterwards) and edited by converting them to a Google copy next to the original.
+*   Comments added through the API can't be attached to specific text in Docs, so Sofia quotes the passage. Docs suggestion mode isn't available in the API.
+*   Files in a shared drive belong to the drive, so their ownership can't be transferred. Ownership of My Drive files moves immediately within `nyp-gdg.com`; people outside have to accept it.
 
 ## Known Issues
 ### Sofia says she'll do something, then stops ("ghosting")
@@ -88,6 +107,6 @@ Switching back to Baileys: after upgrading Baileys, check whether that `pollUpda
 *   Add tool for sofia to get the timetable for the whole week given a week number (e.g. week 12). This will allow her to find out what is the date of the lesson in week n.
 *   ~~Add tool for sofia to get a chat history.~~
 *   ~~Change memory tool. Make it tell sofia related memory and suggest to delete when creating memory.~~
-*   PDF Document Support
+*   ~~PDF Document Support~~
 *   Web Console
 *   ~~Sticker & GIF support.~~

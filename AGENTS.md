@@ -71,9 +71,19 @@ src/services/
   assignmentService.ts, assessmentService.ts, calendarService.ts
   webServer.ts             Express web UI for stickers, GIFs and users (basic auth, localhost only)
   chatContext.ts           AsyncLocalStorage with the chat Sofia is replying in (used by tools)
+  googleWorkspace.ts       Sofia's Google Workspace client (OAuth token from `pnpm google-auth`), Drive/Docs/Sheets/Slides reads
+  workspaceFormat.ts       API JSON -> text for Sofia: Docs Markdown/structure, Sheets grids, Slides text/elements, comments
+  workspaceEdit.ts         batchUpdate request builders (Markdown -> Docs, table cells, A1 ranges, Slides placement)
+  workspaceTools.ts        Workspace read tools, image_search, directory_search
+  workspaceWriteTools.ts   Workspace write tools (drive_manage, drive_share, docs/sheets/slides_edit, *_batch_update, comments)
+  fileTools.ts             send_file and extract_images
+  imageSearch.ts           Image search (Model Studio web_search_image, in its own Qwen request)
+  webTools.ts              DeepSeek Search & Fetch
 src/models/                Sequelize models, each with a static register(sequelize)
-src/utils/                 common.ts (time, semesters/weeks, message splitting), media.ts (sharp/ffmpeg), vision.ts,
-                           getCalendarEvents.ts (Google Calendar), promptChangelog.ts
+src/utils/                 common.ts (time, semesters/weeks, message splitting), media.ts (sharp/ffmpeg), pdf.ts (poppler),
+                           vision.ts, getCalendarEvents.ts (Google Calendar), promptChangelog.ts, googleUrls.ts,
+                           safeFetch.ts (downloads that refuse private addresses), tool.ts (ExtendedDynamicStructuredTool)
+googleAuth.ts              `pnpm google-auth`: signs Sofia in to Google Workspace, lists shared drives
 src/static/prompts/        system.md (Sofia's system prompt, read at runtime) and changelog.json
 src/static/webui.html      Web UI page
 notes/reply-flow.md        How a message becomes a reply, with every check on the way. Keep it in sync.
@@ -103,10 +113,18 @@ Tools are `ExtendedDynamicStructuredTool(fields, usage_str)` (a LangChain `Dynam
 shown when a call fails). The zod schema is sent as JSON Schema with `strict: true`.
 
 - Tools that don't need WhatsApp are created in the `AI` constructor and listed in `this.tools`.
-- Tools that need the chat platform (`send_message`, `send_sticker_gif`, `view_media`, `list_groups`, `read_chat_history`,
-  `send_poll`, `read_poll`) are created in `registerChatTools(adapter)` and pushed onto `this.tools`.
+- Tools that need the chat platform (`send_message`, `send_sticker_gif`, `send_file`, `view_media`, `read_pdf`,
+  `view_pdf_page`, `extract_images`, `list_groups`, `get_group_info`, `read_chat_history`, `send_poll`, `read_poll`) are
+  created in `registerChatTools(adapter)` and pushed onto `this.tools`.
 - `ChatAdapter` is implemented by `SofiaBot`, by `MockChatAdapter` in `cli.ts`, and by inline fakes in
-  `tests/sendMessage.test.ts` and `tests/polls.test.ts`. Change all of them when you change the interface.
+  `tests/sendMessage.test.ts`, `tests/polls.test.ts` and `tests/pdf.test.ts`. Change all of them when you change the
+  interface.
+- Google Workspace tools (`workspaceTools.ts`, `workspaceWriteTools.ts`) are added in the `AI` constructor only when
+  Sofia's token exists (`WORKSPACE_ENABLED`). Read tools return ids and positions edits need; editing tools refuse
+  Office files with a hint to convert them first. Doc edits are by character index, which shifts after every insert:
+  build multi-place edits from the end backwards (see `docTableCellRequests`). Docs/Slides images need a public URL
+  (`withPublicImage` shares private ones by link only during the insert); Slides image `contentUrl`s (30 minutes) can be
+  passed to `createImage` to copy images.
 - Web tools (`USE_WEB_TOOLS`, off by default) depend on the chat provider (`CHAT_PROVIDER`: DeepSeek when
   `CHAT_BASE_URL` is `https://api.deepseek.com`, otherwise Model Studio). Their instructions are added to the prompt at
   runtime by `webToolsPrompt()` (not in system.md) so Sofia is only told about tools she has, with the right names.
@@ -174,7 +192,12 @@ shown when a call fails). The zod schema is sent as JSON Schema with `strict: tr
 - **Baileys poll votes** are decrypted by the bot itself (`handlePollMessage`), see README before upgrading Baileys.
 - **Group senders** are resolved LID → phone number; unknown or unmapped senders show as "Unknown User" (never an error).
   Only private chats with unknown users are rejected.
-- **`ffmpeg`** is needed for GIFs and videos (installed in the Docker image). Media tests skip without it.
+- **`ffmpeg`** is needed for GIFs and videos, **poppler-utils** for PDFs (both in the Docker image). Media and PDF
+  tests skip without them.
+- **Image search can't run on DeepSeek.** `web_search_image` returns HTTP 400 on DeepSeek models, so `image_search`
+  makes its own request to `IMAGE_SEARCH_MODEL` (Qwen). Never add it to the chat request's built-in tools.
+- **Downloading links:** use `fetchPublic` (`src/utils/safeFetch.ts`), never plain `fetch`, for URLs Sofia or users
+  give: the bot runs with host networking next to Postgres, Milvus and the web UI.
 
 ## Legacy code
 
