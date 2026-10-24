@@ -6,6 +6,7 @@
   "scripts": {
     "run": "pnpm tsc && node ./dist/main.js",
     "cli": "pnpm tsc && node ./dist/cli.js",
+    "google-auth": "pnpm tsc && node ./dist/googleAuth.js",
     "test": "pnpm tsc && node --test dist/tests/"
   },
   "keywords": [],

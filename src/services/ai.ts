@@ -24,24 +24,23 @@ import type { PollResults } from './pollService';
 import { ModelImage, toModelImage } from '../utils/media';
 import { parsePages, pdfPageCount, pdfPageImage, readPdfText } from '../utils/pdf';
 import { chatContext } from './chatContext';
+import { ExtendedDynamicStructuredTool, isToolImageResult, ToolImageResult } from '../utils/tool';
 import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
 import { BUILTIN_TOOLS, CHAT_API_KEY, CHAT_BASE_URL, CHAT_MODEL, CHAT_PROVIDER, MODELSTUDIO_BASE_URL, USE_WEB_TOOLS } from '../config/modelStudio';
 import { formatPage, formatSearchResults, webFetch, webSearch } from './webTools';
+import { WORKSPACE_ENABLED } from '../config/googleWorkspace';
+import { GoogleWorkspace, MIME } from './googleWorkspace';
+import { createWorkspaceReadTools } from './workspaceTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
 export { CHAT_MODEL };
+export { ExtendedDynamicStructuredTool, isToolImageResult };
+export type { ToolImageResult };
 
-export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
-  usage_str: string
-  constructor(fields: ConstructorParameters<typeof DynamicStructuredTool>[0], usage_str: string) {
-    super(fields as any);
-    this.usage_str = usage_str;
-  }
-}
 
 /**
  * Chat platform operations needed by the chat tools. Implemented by SofiaBot (WhatsApp) and by the CLI test harness.
@@ -107,12 +106,6 @@ export interface ChatMedia {
 }
 
 /** Returned by tools that show the model an image (`view_media`), the image is added after the tool output. */
-export interface ToolImageResult {
-  text: string,
-  image: ModelImage,
-}
-
-const isToolImageResult = (r: any): r is ToolImageResult => !!r && typeof r == 'object' && typeof r.text == 'string' && !!r.image?.dataUrl;
 
 /** Tools that end Sofia's reply: `end_message`, and send tools called with `end_message: true`. */
 const endsReply = (name: string, args: any) => name == 'end_message' || args?.end_message === true;
@@ -189,6 +182,10 @@ export default class AI {
 
   // Timetable Tool
   timetableTool: ExtendedDynamicStructuredTool;
+
+  /** Sofia's Google Workspace account, set when it's signed in (`pnpm google-auth`). */
+  workspace?: GoogleWorkspace;
+  workspaceTools: ExtendedDynamicStructuredTool[] = [];
 
   // Web Tools on DeepSeek (Model Studio's are built-in tools, see `builtinTools`)
   webSearchTool: ExtendedDynamicStructuredTool;
@@ -762,8 +759,14 @@ export default class AI {
       }
     }, "{url: string}");
 
+    if (WORKSPACE_ENABLED) {
+      this.workspace = new GoogleWorkspace(this.logger);
+      this.workspaceTools = createWorkspaceReadTools(this.workspace);
+    }
+
     this.tools = [
       ...(this.useWebTools && this.chatProvider == 'deepseek' ? [this.webSearchTool, this.webFetchTool] : []),
+      ...this.workspaceTools,
       this.getCurrentTimeTool,
       this.memoryWriteTool, this.memoryUpdateTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
       this.assignmentCreateTool/*, this.assignmentGetTool*/, this.assignmentListTool, this.assignmentUpdateTool, this.assignmentDeleteTool,
@@ -950,7 +953,7 @@ ${await message()}`,
       name: "read_pdf",
       description: "Read the text of a PDF sent in the chat (shown like `<WhatsApp Document media_id=... \"file.pdf\" (PDF)>`), page by page. Long PDFs are read a few pages at a time: it says which pages to read next. If a page has no text (e.g. a scanned document or a chart), look at it with `view_pdf_page`.",
       schema: z.object({
-        source: z.string().describe("[Required] The PDF's media_id from the chat history."),
+        source: z.string().describe("[Required] The PDF's media_id from the chat history, or its Google Drive link."),
         pages: z.string().optional().describe("[Optional] Pages to read, e.g. \"3\", \"2-5\" or \"4-\". Defaults to all pages (as many as fit)."),
       }),
       func: async (args) => {
@@ -966,7 +969,7 @@ ${await message()}`,
       name: "view_pdf_page",
       description: "See one page of a PDF sent in the chat as an image, e.g. for scanned pages, charts, diagrams, posters or layouts that `read_pdf` can't show.",
       schema: z.object({
-        source: z.string().describe("[Required] The PDF's media_id from the chat history."),
+        source: z.string().describe("[Required] The PDF's media_id from the chat history, or its Google Drive link."),
         page: z.number().int().min(1).describe("[Required] The page number, starting at 1."),
       }),
       func: async (args): Promise<ToolImageResult> => {
@@ -1972,8 +1975,15 @@ ${await message()}`,
     return `\nWeb Search: You can search the web (\`web_search\`) and read web pages (${read}). Search when someone asks about current events, news, or facts you're not sure of, instead of guessing, and keep searches few and focused: they are slow and costly, so don't search for things you already know or for class info (use \`get_timetable\`, \`assignment_list\` and your other tools for that). Summarise what you found in your own words for WhatsApp (no Markdown), and paste at most one or two source links as plain URLs when they help.`;
   }
 
-  /** A PDF by its WhatsApp media_id (Drive links are added with the Google Workspace tools). */
+  /** A PDF by its WhatsApp media_id, or a Drive link or file id when Workspace is signed in. */
   async loadPdf(source: string): Promise<{ buffer: Buffer, name: string }> {
+    if (this.workspace && /google\.com\/|^[\w-]{25,}$/.test(source.trim())) {
+      const file = await this.workspace.getFile(source);
+      if (file.mimeType != MIME.pdf) {
+        throw Error(`"${file.name}" isn't a PDF.${file.mimeType?.startsWith('application/vnd.google-apps') ? ' Read it with `google_read_file`.' : ''}`);
+      }
+      return { buffer: await this.workspace.download(file), name: file.name ?? source };
+    }
     if (!this.chatAdapter) {
       throw Error('PDFs from the chat are not available here.');
     }
