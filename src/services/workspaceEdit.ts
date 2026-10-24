@@ -247,6 +247,36 @@ export function slideSetTextRequests(objectId: string, text: string, hasText: bo
   return requests;
 }
 
+/**
+ * Repairs the JSON mistakes models make most when writing long requests: property names without quotes and trailing
+ * commas. Only used when the JSON doesn't parse as it is.
+ */
+export function repairJson(json: string): string {
+  let out = '';
+  for (let i = 0; i < json.length; i++) {
+    const ch = json[i];
+    // Strings are copied as they are (escapes included)
+    if (ch == '"') {
+      let j = i + 1;
+      while (j < json.length && json[j] != '"') j += json[j] == '\\' ? 2 : 1;
+      out += json.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    // A comma before } or ] is dropped
+    if (ch == ',' && /^\s*[}\]]/.test(json.slice(i + 1))) continue;
+    // A bare name before a colon becomes a quoted property name
+    const name = /^[A-Za-z_$][\w$]*(?=\s*:)/.exec(json.slice(i));
+    if (name && /[{,]\s*$/.test(out)) {
+      out += `"${name[0]}"`;
+      i += name[0].length - 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 /** Parses a JSON list of batchUpdate requests from Sofia, with errors she can act on. */
 export function parseRequests(json: string): object[] {
   let parsed: any;
@@ -254,7 +284,12 @@ export function parseRequests(json: string): object[] {
     parsed = JSON.parse(json);
   }
   catch (e: any) {
-    throw Error(`requests_json isn't valid JSON: ${e.message}`);
+    try {
+      parsed = JSON.parse(repairJson(json));
+    }
+    catch {
+      throw Error(`requests_json isn't valid JSON: ${e.message}. Use double quotes around every property name and string, and no trailing commas.`);
+    }
   }
   const requests = Array.isArray(parsed) ? parsed : parsed?.requests;
   if (!Array.isArray(requests) || requests.length == 0 || requests.some(r => !r || typeof r != 'object' || Array.isArray(r))) {

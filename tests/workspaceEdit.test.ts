@@ -299,3 +299,12 @@ test('a generated image (img_N) is inserted from a temporary Drive copy, which i
   assert.match(last(calls), /^files\.delete .*"fileId":"upload1"/);
   await assert.rejects(tools.docs_edit.invoke({ url: doc.id, action: 'insert_image', image: 'img_9' }), /img_9 isn't available any more/);
 });
+
+test('batch requests with unquoted property names or trailing commas are repaired, other broken JSON explains the rules', async () => {
+  const { parseRequests } = await import('../src/services/workspaceEdit');
+  assert.deepEqual(parseRequests('[{createShape: {objectId: "card01", shapeType: "ROUND_RECTANGLE",},},]'), [{ createShape: { objectId: 'card01', shapeType: 'ROUND_RECTANGLE' } }]);
+  // Text inside strings is never changed, even when the rest needed repairing
+  assert.deepEqual(parseRequests('[{insertText: {objectId: "lbl01", text: "01, LOAD: pull, then {x: 1},"},}]'), [{ insertText: { objectId: 'lbl01', text: '01, LOAD: pull, then {x: 1},' } }]);
+  assert.deepEqual(parseRequests('[{"insertText": {"objectId": "lbl01", "text": "01, LOAD: pull the text out"}}]'), [{ insertText: { objectId: 'lbl01', text: '01, LOAD: pull the text out' } }]);
+  assert.throws(() => parseRequests("[{'insertText': {}}]"), /Use double quotes around every property name and string/);
+});
