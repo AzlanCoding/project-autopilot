@@ -33,6 +33,7 @@ import { BUILTIN_TOOLS, CHAT_API_KEY, CHAT_BASE_URL, CHAT_MODEL, CHAT_PROVIDER, 
 import { formatPage, formatSearchResults, webFetch, webSearch } from './webTools';
 import { WORKSPACE_ENABLED } from '../config/googleWorkspace';
 import { GoogleWorkspace, MIME } from './googleWorkspace';
+import { isDriveId, toGoogleLink } from '../utils/googleUrls';
 import { createWorkspaceReadTools } from './workspaceTools';
 import { createWorkspaceWriteTools } from './workspaceWriteTools';
 import { createFileTools, ExtractedImages } from './fileTools';
@@ -2002,8 +2003,9 @@ ${await message()}`,
 
   /** A PDF by its WhatsApp media_id, or a Drive link or file id when Workspace is signed in. */
   async loadPdf(source: string): Promise<{ buffer: Buffer, name: string }> {
-    if (this.workspace && /google\.com\/|^[\w-]{25,}$/.test(source.trim())) {
-      const file = await this.workspace.getFile(source);
+    const google = this.workspace && (/^https?:\/\//.test(source.trim()) || isDriveId(source)) ? await toGoogleLink(source) : null;
+    if (this.workspace && google) {
+      const file = await this.workspace.getFile(google);
       if (file.mimeType != MIME.pdf) {
         throw Error(`"${file.name}" isn't a PDF.${file.mimeType?.startsWith('application/vnd.google-apps') ? ' Read it with `google_read_file`.' : ''}`);
       }

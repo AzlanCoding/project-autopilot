@@ -215,3 +215,57 @@ test('reading a .docx makes, reads and deletes a temporary copy; missing files s
   assert.deepEqual(calls, [`files.get ${id}`, `files.copy ${id} -> ${MIME.doc} in root`, 'docs.get copy1', 'files.delete copy1']);
   await assert.rejects(ws.getFile('missingmissingmissingmissing'), /can't find that file.*share it with that account/);
 });
+
+/** Replaces fetch with redirects from `routes` (url -> next url, or null for a normal page), recording each request. */
+function stubRedirects(routes: { [url: string]: string | null }) {
+  const requested: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: any, init: any) => {
+    const url = String(input);
+    requested.push(`${init?.method ?? 'GET'} ${url}`);
+    const next = routes[url];
+    return next ? new Response(null, { status: 301, headers: { location: next } }) : new Response('page', { status: 200 });
+  }) as any;
+  return { requested, restore: () => { globalThis.fetch = original; } };
+}
+
+test('short links are followed to the Google file they lead to, without opening Google itself or private addresses', async () => {
+  const { resolveLink } = await import('../src/utils/safeFetch');
+  const { toGoogleLink, isDriveId } = await import('../src/utils/googleUrls');
+  const doc = `https://docs.google.com/document/d/${ID}/edit`;
+  const stub = stubRedirects({ 'http://93.184.216.34/gdgoc-plan': 'http://93.184.216.35/r/abc', 'http://93.184.216.35/r/abc': doc, 'http://93.184.216.34/to-private': 'http://192.168.1.10/admin' });
+  try {
+    assert.equal(await toGoogleLink('http://93.184.216.34/gdgoc-plan'), doc);
+    assert.deepEqual(stub.requested, ['HEAD http://93.184.216.34/gdgoc-plan', 'HEAD http://93.184.216.35/r/abc']); // stops at Google, doesn't fetch it
+    assert.equal(await toGoogleLink('http://93.184.216.34/just-a-page'), null);
+    await assert.rejects(resolveLink('http://93.184.216.34/to-private'), /192\.168\.1\.10 is a private or local address/);
+  }
+  finally {
+    stub.restore();
+  }
+  assert.equal(await toGoogleLink(ID), ID);
+  assert.equal(isDriveId('ACE0B927961B819070F42E49AD5E07AD'), false, 'WhatsApp media ids are not Drive ids');
+  assert.equal(await toGoogleLink('ACE0B927961B819070F42E49AD5E07AD'), null);
+});
+
+test('Drive shortcuts open their target, from a link or a short link, and listings say what they point to', async () => {
+  const target = 'targettargettargettargetdoc';
+  const shortcut = 'shortcutshortcutshortcutid1';
+  const { clients } = fakeClients({
+    [shortcut]: { id: shortcut, name: 'Proposal (shortcut)', mimeType: 'application/vnd.google-apps.shortcut', shortcutDetails: { targetId: target, targetMimeType: MIME.doc } },
+    [target]: { id: target, name: 'Proposal', mimeType: MIME.doc, webViewLink: `https://docs.google.com/document/d/${target}/edit` },
+  });
+  const ws = new GoogleWorkspace(undefined, clients);
+  assert.equal((await ws.getFile(`https://drive.google.com/file/d/${shortcut}/view`)).name, 'Proposal');
+  const stub = stubRedirects({ 'http://93.184.216.34/s': `https://drive.google.com/file/d/${shortcut}/view` });
+  try {
+    assert.equal((await ws.getFile('http://93.184.216.34/s')).id, target);
+    await assert.rejects(ws.getFile('http://93.184.216.34/elsewhere'), /doesn't lead to a Google Docs, Sheets, Slides or Drive file/);
+  }
+  finally {
+    stub.restore();
+  }
+  const { driveFileLine } = await import('../src/services/workspaceFormat');
+  assert.equal(driveFileLine({ name: 'Proposal (shortcut)', mimeType: 'application/vnd.google-apps.shortcut', shortcutDetails: { targetMimeType: MIME.doc }, webViewLink: 'https://drive/x' }, String),
+    '- "Proposal (shortcut)" (Shortcut to Google Doc) https://drive/x');
+});

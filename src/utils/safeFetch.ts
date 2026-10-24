@@ -66,3 +66,36 @@ export async function fetchPublic(input: string, { maxBytes = 20 * 1024 * 1024, 
     return { buffer, contentType: res.headers.get('content-type')?.split(';')[0].trim() ?? '', url: url.toString() };
   }
 }
+
+/**
+ * Follows a link's redirects (e.g. a short link like goo.gle/...) without downloading the page, and returns where it
+ * ends up, or the first address `stop` accepts. Every hop is checked like `fetchPublic`.
+ */
+export async function resolveLink(input: string, { stop, maxHops = 6, timeoutMs = 15000 }: { stop?: (url: URL) => boolean, maxHops?: number, timeoutMs?: number } = {}): Promise<string> {
+  let url: URL;
+  try {
+    url = new URL(input.trim());
+  }
+  catch {
+    throw Error(`"${input}" isn't a link.`);
+  }
+  for (let i = 0; i <= maxHops; i++) {
+    if (stop?.(url)) {
+      return url.toString();
+    }
+    await checkUrl(url);
+    const request = (method: string) => fetch(url, { method, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SofiaBot/1.0)' } });
+    // Some shorteners don't answer HEAD, so fall back to GET (its body is never read)
+    let res = await request('HEAD').catch(() => undefined);
+    if (!res || res.status == 405 || res.status == 403 || res.status == 404 || (res.status >= 500)) {
+      res = await request('GET');
+    }
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    await res.body?.cancel().catch(() => undefined);
+    if (!location) {
+      return url.toString();
+    }
+    url = new URL(location, url);
+  }
+  throw Error(`${input} redirects too many times.`);
+}

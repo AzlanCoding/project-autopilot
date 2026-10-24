@@ -3,7 +3,7 @@ import { Readable } from 'stream';
 import { z } from 'zod';
 import type { docs_v1, drive_v3, sheets_v4, slides_v1 } from 'googleapis';
 import { ExtendedDynamicStructuredTool } from '../utils/tool';
-import { googleFileLink } from '../utils/googleUrls';
+import { googleFileLink, isDriveId, toGoogleLink } from '../utils/googleUrls';
 import { GDG_SHARED_DRIVE_ID } from '../config/googleWorkspace';
 import type { ChatMedia } from './ai';
 import { GoogleWorkspace, MIME, OFFICE_TO_NATIVE } from './googleWorkspace';
@@ -54,14 +54,15 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
    */
   const withPublicImage = async <T>(source: string, fn: (url: string) => Promise<T>): Promise<T> => {
     const s = source.trim();
-    if (/^https?:\/\//.test(s) && !/(docs|drive)\.google\.com\//.test(s)) {
+    const google = /^https?:\/\//.test(s) || isDriveId(s) ? await toGoogleLink(s) : null;
+    if (/^https?:\/\//.test(s) && !google) {
       return fn(s);
     }
     let fileId: string;
     let uploaded = false;
     let permissionId: string | undefined;
-    if (/^https?:\/\//.test(s) || /^[\w-]{25,}$/.test(s)) {
-      const file = await ws.getFile(s);
+    if (google) {
+      const file = await ws.getFile(google);
       if (!file.mimeType?.startsWith('image/')) {
         throw Error(`"${file.name}" isn't an image.`);
       }

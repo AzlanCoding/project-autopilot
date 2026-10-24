@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ExtendedDynamicStructuredTool } from '../utils/tool';
 import { parsePages, pdfImages, pdfPageCount, pdfPageImage } from '../utils/pdf';
 import { fetchPublic } from '../utils/safeFetch';
+import { isDriveId, toGoogleLink } from '../utils/googleUrls';
 import { chatContext } from './chatContext';
 import type { ChatAdapter, OutgoingFile } from './ai';
 import { GoogleWorkspace, MIME } from './googleWorkspace';
@@ -35,7 +36,6 @@ export class ExtractedImages {
 }
 
 const isExtractedId = (s: string) => /^img_\d+$/.test(s.trim());
-const isGoogleSource = (s: string) => /(docs|drive)\.google\.com\//.test(s) || /^[\w-]{25,}$/.test(s.trim());
 const safeName = (name: string) => name.replace(/[\\/:*?"<>|\n]+/g, ' ').trim().slice(0, 120) || 'file';
 /** A name for an image made from one page, e.g. "poster page 2.png" from "poster.pdf". */
 const pageName = (name: string, page: number) => `${safeName(name).replace(/\.pdf$/i, '')} page ${page}.png`;
@@ -61,9 +61,11 @@ export function createFileTools({ adapter, workspace, extracted }: FileToolOptio
       const image = extracted.get(s);
       return { buffer: image.buffer, mime: image.mime, fileName: `${s}.${imageExt(image.mime)}` };
     }
-    if (isGoogleSource(s)) {
+    // Google links, file ids, and links that redirect to one (short links)
+    const google = workspace ? await toGoogleLink(s) : null;
+    if (google) {
       const ws = needWorkspace();
-      const file = await ws.getFile(s);
+      const file = await ws.getFile(google);
       const name = safeName(file.name ?? 'file');
       const exportAs = async (mime: string, ext: string) => ({ buffer: await ws.export(file, mime), mime, fileName: `${name}.${ext}` });
       switch (file.mimeType) {
@@ -129,9 +131,10 @@ export function createFileTools({ adapter, workspace, extracted }: FileToolOptio
     func: async (args) => {
       const s = String((args as any).source).trim();
       const found: { buffer: Buffer, label: string }[] = [];
-      if (isGoogleSource(s)) {
+      const google = /^https?:\/\//.test(s) || isDriveId(s) ? await toGoogleLink(s) : null;
+      if (google) {
         const ws = needWorkspace();
-        const file = await ws.getFile(s);
+        const file = await ws.getFile(google);
         if (file.mimeType == MIME.doc) {
           for (const tab of docTabs(await ws.getDoc(file.id!))) {
             for (const [objectId, obj] of Object.entries(tab.inlineObjects ?? {})) {

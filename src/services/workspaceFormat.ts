@@ -338,7 +338,10 @@ export function fileKind(mimeType?: string | null): string {
 
 export function driveFileLine(f: drive_v3.Schema$File, formatTime: (ms: number) => string): string {
   const modified = f.modifiedTime ? `, modified ${formatTime(Date.parse(f.modifiedTime))}` : '';
-  return `- ${quote(f.name ?? '')} (${fileKind(f.mimeType)}${modified}) ${f.webViewLink ?? ''}`.trimEnd();
+  // A shortcut opens its target, so show what it points to (google_read_file follows it)
+  const kind = f.mimeType == 'application/vnd.google-apps.shortcut' && f.shortcutDetails?.targetMimeType
+    ? `Shortcut to ${fileKind(f.shortcutDetails.targetMimeType)}` : fileKind(f.mimeType);
+  return `- ${quote(f.name ?? '')} (${kind}${modified}) ${f.webViewLink ?? ''}`.trimEnd();
 }
 
 // ---------- Comments ----------

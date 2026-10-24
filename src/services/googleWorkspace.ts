@@ -3,7 +3,7 @@ import { google, docs_v1, drive_v3, people_v1, sheets_v4, slides_v1 } from 'goog
 type OAuth2Client = InstanceType<typeof google.auth.OAuth2>;
 import type { Logger } from 'pino';
 import { WORKSPACE_CLIENT_SECRET_PATH, WORKSPACE_TOKEN_PATH } from '../config/googleWorkspace';
-import { GoogleFileRef, parseGoogleUrl } from '../utils/googleUrls';
+import { GoogleFileRef, parseGoogleUrl, toGoogleLink } from '../utils/googleUrls';
 import { formatDateTime } from '../utils/common';
 import { PDF_MAX_BYTES } from '../utils/pdf';
 import {
@@ -84,7 +84,18 @@ export class GoogleWorkspace {
 
   /** A file's metadata from a link or id, following shortcuts. Errors are rewritten so Sofia knows what to tell people. */
   async getFile(input: string | GoogleFileRef): Promise<drive_v3.Schema$File & { ref: GoogleFileRef }> {
-    const ref = typeof input == 'string' ? parseGoogleUrl(input) : input;
+    let ref: GoogleFileRef;
+    if (typeof input == 'string') {
+      // Short links (goo.gle/..., bit.ly/...) are followed to the Google link they lead to
+      const link = await toGoogleLink(input);
+      if (!link) {
+        throw Error(/^https?:\/\//i.test(input.trim()) ? `${input} doesn't lead to a Google Docs, Sheets, Slides or Drive file.` : `"${input}" isn't a Google Docs, Sheets, Slides or Drive link or file id.`);
+      }
+      ref = parseGoogleUrl(link);
+    }
+    else {
+      ref = input;
+    }
     const file = await this.call(() => this.api.drive.files.get({ fileId: ref.id, fields: FILE_FIELDS, supportsAllDrives: true }), ref.id);
     if (file.mimeType == MIME.shortcut && file.shortcutDetails?.targetId) {
       return this.getFile({ ...ref, id: file.shortcutDetails.targetId });
@@ -286,7 +297,7 @@ export class GoogleWorkspace {
 
   async listFolder(id: string): Promise<string> {
     const res = await this.call(() => this.api.drive.files.list({
-      q: `'${id}' in parents and trashed = false`, fields: 'files(id,name,mimeType,webViewLink,modifiedTime)', pageSize: 200,
+      q: `'${id}' in parents and trashed = false`, fields: 'files(id,name,mimeType,webViewLink,modifiedTime,shortcutDetails(targetId,targetMimeType))', pageSize: 200,
       orderBy: 'folder,name', supportsAllDrives: true, includeItemsFromAllDrives: true,
     }), id);
     const files = res.files ?? [];
@@ -301,7 +312,7 @@ export class GoogleWorkspace {
     const kindMime: { [k: string]: string } = { doc: MIME.doc, sheet: MIME.sheet, slides: MIME.slides, folder: MIME.folder, pdf: MIME.pdf };
     if (kind && kindMime[kind]) q.push(`mimeType = '${kindMime[kind]}'`);
     const res = await this.call(() => this.api.drive.files.list({
-      q: q.join(' and '), fields: 'files(id,name,mimeType,webViewLink,modifiedTime)', pageSize: 25,
+      q: q.join(' and '), fields: 'files(id,name,mimeType,webViewLink,modifiedTime,shortcutDetails(targetId,targetMimeType))', pageSize: 25,
       corpora: 'allDrives', supportsAllDrives: true, includeItemsFromAllDrives: true,
     }));
     const files = res.files ?? [];

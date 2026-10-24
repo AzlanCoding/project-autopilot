@@ -1,3 +1,5 @@
+import { resolveLink } from './safeFetch';
+
 export type GoogleFileKind = 'document' | 'spreadsheet' | 'presentation' | 'folder' | 'file' | 'unknown';
 
 export interface GoogleFileRef {
@@ -68,4 +70,37 @@ export function googleFileLink(id: string, mimeType?: string | null): string {
     case 'application/vnd.google-apps.folder': return `https://drive.google.com/drive/folders/${id}`;
     default: return `https://drive.google.com/file/d/${id}/view`;
   }
+}
+
+/** Whether a link points at a Google Docs/Sheets/Slides/Drive file or folder. */
+export function isGoogleFileUrl(input: string | URL): boolean {
+  try {
+    const url = typeof input == 'string' ? new URL(input.trim()) : input;
+    return /^(docs|drive)\.google\.com$/.test(url.hostname);
+  }
+  catch {
+    return false;
+  }
+}
+
+/**
+ * A bare Drive file id, e.g. 1AbC...xyz: 25+ letters, digits, - and _, with lowercase letters. WhatsApp media ids look
+ * similar but are uppercase (e.g. ACE0B927961B819070F42E49AD5E07AD), so they aren't mistaken for Drive files.
+ */
+export const isDriveId = (input: string) => /^[\w-]{25,}$/.test(input.trim()) && /[a-z]/.test(input);
+
+/**
+ * The Google file link (or id) `input` refers to: itself if it's a Google link or a file id, where it redirects to if
+ * it's a link that leads to one (e.g. goo.gle/... or bit.ly/... short links), or null if it isn't a Google file.
+ */
+export async function toGoogleLink(input: string): Promise<string | null> {
+  const s = input.trim().replace(/^<|>$/g, '');
+  if (isGoogleFileUrl(s) || isDriveId(s)) {
+    return s;
+  }
+  if (!/^https?:\/\//i.test(s)) {
+    return null;
+  }
+  const final = await resolveLink(s, { stop: url => isGoogleFileUrl(url) });
+  return isGoogleFileUrl(final) ? final : null;
 }

@@ -73,6 +73,7 @@ How it works and its limits:
 *   Docs and Slides can only insert images from public links. Images that aren't public (sent on WhatsApp, or a Drive file such as a logo) are shared by link only while they're inserted, then unshared. Sheets shows images with `=IMAGE(link)`, which needs a link that stays public.
 *   Image search uses Model Studio's `web_search_image` in a separate request to `qwen3.8-flash` (`IMAGE_SEARCH_MODEL`), because DeepSeek models don't support it. Each search takes about 20 seconds. Tenor's GIF API was shut down in June 2026, so GIFs come from image search too.
 *   The Docs and Sheets APIs only work on Google files, so `.docx`, `.xlsx` and `.pptx` files are read through a temporary converted copy (deleted afterwards) and edited by converting them to a Google copy next to the original.
+*   Links can be Google links, file ids, Drive shortcuts (opened as their target) or short links that redirect to a Google file (e.g. `goo.gle/...`, followed without opening private addresses).
 *   Comments added through the API can't be attached to specific text in Docs, so Sofia quotes the passage. Docs suggestion mode isn't available in the API.
 *   Files in a shared drive belong to the drive, so their ownership can't be transferred. Ownership of My Drive files moves immediately within `nyp-gdg.com`; people outside have to accept it.
 
