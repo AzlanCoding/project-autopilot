@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { docs_v1, drive_v3, sheets_v4, slides_v1 } from 'googleapis';
 import { ExtendedDynamicStructuredTool } from '../utils/tool';
 import { googleFileLink, isDriveId, toGoogleLink } from '../utils/googleUrls';
+import { fetchPublic } from '../utils/safeFetch';
 import { GDG_SHARED_DRIVE_ID } from '../config/googleWorkspace';
 import type { ChatMedia } from './ai';
 import { GoogleWorkspace, MIME, OFFICE_TO_NATIVE } from './googleWorkspace';
@@ -48,20 +49,37 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
     return file;
   };
 
+  /** Uploads an image to Sofia's Drive as a temporary file, returning its id (deleted again by `withPublicImage`). */
+  const uploadTemporaryImage = async (buffer: Buffer, mime: string, label: string) => (await ws.call(() => api().drive.files.create({
+    requestBody: { name: `[Sofia temporary image] ${label}`.slice(0, 200), parents: ['root'] },
+    media: { mimeType: mime, body: Readable.from(buffer) }, fields: 'id',
+  }))).id!;
+
   /**
    * Calls `fn` with a public URL for an image: a public link as is; a WhatsApp image (media_id) or Drive image shared as
    * "anyone with the link" only while it's inserted (Docs and Slides copy the image in), then unshared or deleted.
+   * Many sites block Google's image fetcher (e.g. Wikimedia), so a public link Google can't retrieve is downloaded and
+   * inserted from a temporary Drive copy instead.
    */
   const withPublicImage = async <T>(source: string, fn: (url: string) => Promise<T>): Promise<T> => {
     const s = source.trim();
     const google = /^https?:\/\//.test(s) || isDriveId(s) ? await toGoogleLink(s) : null;
-    if (/^https?:\/\//.test(s) && !google) {
-      return fn(s);
-    }
     let fileId: string;
     let uploaded = false;
     let permissionId: string | undefined;
-    if (google) {
+    if (/^https?:\/\//.test(s) && !google) {
+      try {
+        return await fn(s);
+      }
+      catch (e: any) {
+        if (!/retriev|publicly accessible/i.test(e?.message ?? '')) throw e;
+        const { buffer, contentType } = await fetchPublic(s);
+        if (!contentType.startsWith('image/')) throw Error(`${s} isn't an image (${contentType || 'unknown type'}).`);
+        fileId = await uploadTemporaryImage(buffer, contentType, new URL(s).hostname);
+        uploaded = true;
+      }
+    }
+    else if (google) {
       const file = await ws.getFile(google);
       if (!file.mimeType?.startsWith('image/')) {
         throw Error(`"${file.name}" isn't an image.`);
@@ -76,11 +94,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       if (media.kind != 'image' && media.kind != 'gif') {
         throw Error(`${source} is a ${media.kind}, not an image.`);
       }
-      const created = await ws.call(() => api().drive.files.create({
-        requestBody: { name: `[Sofia temporary image] ${s}`, parents: ['root'] },
-        media: { mimeType: media.mime, body: Readable.from(media.buffer) }, fields: 'id',
-      }));
-      fileId = created.id!;
+      fileId = await uploadTemporaryImage(media.buffer, media.mime, s);
       uploaded = true;
     }
     try {
@@ -130,7 +144,8 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
         const media = content && type == 'doc' ? { mimeType: 'text/markdown', body: content }
           : content && type == 'sheet' ? { mimeType: 'text/csv', body: content } : undefined;
         const f = await ws.call(() => api().drive.files.create({ requestBody: { name, mimeType, parents: [parent] }, media, fields, supportsAllDrives: true }));
-        return done(f, 'Created');
+        // New decks come with one empty title slide, which is easy to miss when adding slides after it
+        return done(f, 'Created') + (type == 'slides' ? '\nIt starts with one empty title slide (slide 1): fill it in or delete it.' : '');
       }
       if (!url) throw Error(`${action} needs the file's link.`);
       const file = await ws.getFile(url);
@@ -198,7 +213,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           const perms = await list();
           const lines = perms.map(p => {
             const who = p.type == 'anyone' ? 'Anyone with the link' : p.type == 'domain' ? `Everyone at ${p.domain}` : `${p.displayName ?? ''} <${p.emailAddress}>`.trim();
-            const inherited = p.permissionDetails?.some(d => d.inherited) ? ' (from the shared drive)' : '';
+            const inherited = p.permissionDetails?.some(d => d.inherited) ? (file.driveId ? ' (from the shared drive)' : ' (from a parent folder)') : '';
             return `- ${who}: ${names[p.role ?? ''] ?? p.role}${p.pendingOwner ? ' (pending owner)' : ''}${inherited}`;
           });
           return `Access to "${file.name}"${file.driveId ? ' (in a shared drive)' : ''}:\n${lines.join('\n') || '(nobody else)'}`;

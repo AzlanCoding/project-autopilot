@@ -171,3 +171,28 @@ test('a private image is shared by link only while it is inserted, and unshared 
   assert.match(ok.calls.find(c => c.startsWith('docs.batchUpdate'))!, /"uri":"https:\/\/lh3\.googleusercontent\.com\/d\/upload1"/);
   assert.match(last(ok.calls)!, /^files\.delete .*"fileId":"upload1"/);
 });
+
+test("a public image Google can't fetch is downloaded and inserted from a temporary Drive copy, which is deleted", async () => {
+  const doc = { id: LONG('doc'), name: 'Proposal', mimeType: MIME.doc };
+  let attempts = 0;
+  const uris: string[] = [];
+  const { tools, calls } = workspace({ [doc.id]: doc }, {
+    docsBatchUpdate: async ({ requestBody }: any) => {
+      const uri = requestBody.requests[0].insertInlineImage.uri;
+      uris.push(uri);
+      if (attempts++ == 0) throw Object.assign(new Error('There was a problem retrieving the image. The provided image should be publicly accessible'), { code: 400 });
+      return { data: { replies: [] } };
+    },
+  });
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(Buffer.from('png'), { status: 200, headers: { 'content-type': 'image/png' } })) as any;
+  try {
+    assert.match(await tools.docs_edit.invoke({ url: doc.id, action: 'insert_image', image: 'http://93.184.216.34/logo.png' }) as string, /Inserted the image/);
+  }
+  finally {
+    globalThis.fetch = original;
+  }
+  assert.deepEqual(uris, ['http://93.184.216.34/logo.png', 'https://lh3.googleusercontent.com/d/upload1']);
+  assert.match(calls.find(c => c.startsWith('files.create'))!, /"name":"\[Sofia temporary image\] 93\.184\.216\.34"/);
+  assert.match(last(calls), /^files\.delete .*"fileId":"upload1"/);
+});

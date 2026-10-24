@@ -62,7 +62,7 @@ async function check() {
   const drives = (await drive.drives.list({ pageSize: 100 })).data.drives ?? [];
   console.log(drives.length
     ? `\nShared drives (set GDG_SHARED_DRIVE_ID to the club's):\n${drives.map(d => `  ${d.name}: ${d.id}`).join('\n')}`
-    : '\nNo shared drives yet: add sofia@nyp-gdg.com to the club\'s shared drive as a Content manager.');
+    : '\nNo shared drives (that\'s fine if the club uses a shared folder, it shows up in Sofia\'s "Shared with me").');
 }
 
 (async () => {
