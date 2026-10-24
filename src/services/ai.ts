@@ -28,6 +28,8 @@ import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
 import { CHAT_MODEL, MODELSTUDIO_BASE_URL } from '../config/modelStudio';
+import moment from 'moment-timezone';
+import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
 export { CHAT_MODEL };
 
@@ -864,14 +866,32 @@ ${await message()}`,
 
     this.readChatHistoryTool = new ExtendedDynamicStructuredTool({
       name: "read_chat_history",
-      description: "Read the recent chat history you had with a user (by user id) or in a group chat (by group id ending with `@g.us`). Useful to check if someone replied, or to recall what was said in another chat. Be discreet about sharing private chats with other people.",
+      description: "Read the recent chat history you had with a user (by user id) or in a group chat (by group id ending with `@g.us`). Useful to check if someone replied, to recall what was said in another chat, or to read older messages of the current chat that are left out of your history (use `after`). Be discreet about sharing private chats with other people.",
       schema: z.object({
         id: z.string().describe("[Required] The user id or group id. Get them from `user_list` or `list_groups`."),
-        limit: z.number().int().min(1).max(100).optional().describe("Maximum number of most recent messages to return. Defaults to 30."),
+        limit: z.number().int().min(1).max(100).optional().describe("Maximum number of messages to return. Defaults to 30. Without `after` these are the most recent messages."),
+        after: z.string().optional().describe("[Optional] Only return messages sent after this date and time, as ISO 8601 in Singapore Timezone. E.g, 2026-04-16T11:47:12+08:00. Returns the earliest messages after it (up to `limit`), and says how to read further if there are more."),
       }),
       func: async (args) => {
-        const { id, limit = 30 } = args as any;
-        const messages = (await adapter.loadChatById(id)).slice(-limit);
+        const { id, limit = 30, after } = args as any;
+        let messages = await adapter.loadChatById(id);
+        let more = 0;
+        if (after) {
+          // A time without an offset is taken as Singapore time, not the server's timezone
+          const afterTime = moment.tz(after, moment.ISO_8601, SCHEDULE_TIMEZONE);
+          if (!afterTime.isValid()) {
+            throw Error(`Invalid \`after\` "${after}", use ISO 8601 in Singapore Timezone, e.g. 2026-04-16T11:47:12+08:00`);
+          }
+          messages = messages.filter(m => m.time * 1000 > afterTime.valueOf());
+          more = Math.max(0, messages.length - limit);
+          messages = messages.slice(0, limit);
+          if (messages.length === 0) {
+            return `No messages found in this chat after ${formatDateTime(afterTime.valueOf())}.`;
+          }
+        }
+        else {
+          messages = messages.slice(-limit);
+        }
         if (messages.length === 0) {
           return "No messages found in this chat.";
         }
@@ -890,9 +910,13 @@ ${await message()}`,
           }
           lines.push(`[${formatDateTime(m.time * 1000)}] ${name}: ${m.quotedMessage ? `(Quoting: ${m.quotedMessage}) ` : ''}${m.text}`);
         }
+        if (more) {
+          const last = moment(messages[messages.length - 1].time * 1000).tz(SCHEDULE_TIMEZONE).format();
+          lines.push(`(${more} more message${more == 1 ? '' : 's'} after these, call again with after: "${last}" to read them)`);
+        }
         return lines.join('\n');
       }
-    }, "{id: string, limit?: number}");
+    }, "{id: string, limit?: number, after?: string}");
 
     this.sendPollTool = new ExtendedDynamicStructuredTool({
       name: "send_poll",

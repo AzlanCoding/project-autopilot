@@ -3,6 +3,8 @@ import { Sequelize, ModelStatic, InferCreationAttributes, InferAttributes } from
 import { User } from '../models/User'; // Import User model
 import { PreProccessChatMsg } from './botService';
 import { formatDateTime } from '../utils/common';
+import moment from 'moment-timezone';
+import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 import { EasyInputMessage, ResponseInputItem } from 'openai/resources/responses/responses.js';
 import Store from './store';
 import { loadPromptChanges, promptChangeNote } from '../utils/promptChangelog';
@@ -98,6 +100,8 @@ export class UserService {
     };
     /** Index in `results` of each (merged) chat message, used to keep the last `limit` messages with their tool calls. */
     const blockStarts: number[] = [];
+    /** Time of the first message of each (merged) chat message, matching `blockStarts`. */
+    const blockTimes: number[] = [];
 
     let lastMsgId;
 
@@ -160,6 +164,7 @@ export class UserService {
       // Final assembly for the block
       let finalBlock = outputParts.join('\n\n');
       blockStarts.push(results.length);
+      blockTimes.push(currentMessage.time);
       results.push((finalBlock.startsWith('AI:\n') ? { role: 'assistant', content: finalBlock.slice(4), type: 'message' } : { role: 'user', content: finalBlock, type: 'message' }) as EasyInputMessage);
 
       // Move index to the next unprocessed message
@@ -175,6 +180,15 @@ export class UserService {
     // A note at the start of the window has no older messages before it to explain
     while (window.length && notes.has(window[0])) {
       window.shift();
+    }
+    // Tell Sofia older messages were left out, and how to read them if she needs to
+    if (blockStarts.length > limit) {
+      const firstShown = moment(blockTimes[blockTimes.length - limit] * 1000).tz(SCHEDULE_TIMEZONE).format();
+      window.unshift({
+        role: 'system',
+        content: `Only the latest ${limit} messages of this chat are shown, older ones are left out. If you need an older message (e.g. someone refers to something said earlier), use \`read_chat_history\` with this chat's ID and \`after\` set to a time before the earliest message shown (${firstShown}).`,
+        type: 'message',
+      } as EasyInputMessage);
     }
     return [window, lastMsgId];
   }

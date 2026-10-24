@@ -47,7 +47,9 @@ test('the window is the last messages, tool calls do not make it bigger, and old
     msg('u5', 'azlan', 4, 'thanks'),
   ];
   const [window] = await users.formatAndMergeMessages(history, 3);
-  assert.deepEqual(summarise(window), [
+  // Sofia is told older messages were left out, and from when to read them with `read_chat_history`
+  assert.match((window[0] as any).content, /^Only the latest 3 messages .*`read_chat_history` with this chat's ID and `after` set to a time before the earliest message shown \(2026-10-12T10:02:00\+08:00\)\.$/);
+  assert.deepEqual(summarise(window.slice(1)), [
     'user: remind me at 11:15',
     'assistant: done!',
     'function_call',
@@ -63,6 +65,7 @@ test('tool results saved with created_at are stamped with their exact time', asy
     { data: output('c1', '[]'), createdAt: new Date('2026-10-12T10:11:46+08:00') },
   ]]]);
   const [window] = await users.formatAndMergeMessages([msg('u1', 'azlan', 0, 'tasks?'), msg('a2', 'AI', 1, 'checking')], 24);
+  assert.equal(window.length, 4, 'nothing left out, so no note');
   assert.equal(window[3].type, 'function_call_output');
   assert.equal((window[3] as any).output, '[Result from 12/10/2026, Mon (10:11:46), it may be out of date now] []');
 });

@@ -47,5 +47,7 @@ test('no note when every message came after the change, or the change is outside
   const [windowed] = await users.formatAndMergeMessages([
     msg('azlan', '11:00', 'old'), msg('AI', '11:01', 'old reply'), msg('azlan', '12:30', 'a'), msg('AI', '12:31', 'b'),
   ], 2);
-  assert.deepEqual(summarise(windowed), ['user: azlan:', 'assistant: b']);
+  // The only note is the one saying older messages were left out
+  assert.match((windowed[0] as any).content, /^Only the latest 2 messages/);
+  assert.deepEqual(summarise(windowed.slice(1)), ['user: azlan:', 'assistant: b']);
 });

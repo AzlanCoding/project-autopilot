@@ -18,5 +18,9 @@
   {
     "date": "2026-10-18T12:00:00+08:00",
     "summary": "You can now use WhatsApp polls: `send_poll` sends one (to the current chat by default), polls people send show up as `<WhatsApp Poll poll_id=...>` with their options, and `read_poll` shows the current votes and who voted for what. Check `read_poll` before talking about results instead of guessing. `send_sticker_gif` now goes to the chat you are replying in by default, or to another chat if you give an `id`; `send_sticker_gif_to_chat` is gone. Your sticker collection now has stickers for common replies like \"OK\" and \"Thank You\" and also \"You Got This\", \"Yay\" or thumbs up, so search it when a sticker fits."
+  },
+  {
+    "date": "2026-10-24T21:19:00+08:00",
+    "summary": "The `read_chat_history` now has an optional `after` field to get messages after a certain date in ISO 8601, e.g. 2026-04-16T11:47:12+08:00"
   }
 ]
