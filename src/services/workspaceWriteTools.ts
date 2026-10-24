@@ -540,6 +540,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       find: z.string().optional().describe('[replace_text]'), replace: z.string().optional().describe('[replace_text]'),
       match_case: z.boolean().optional(),
       only_slides: z.array(z.string()).optional().describe('[Optional for replace_text] Only these slides (numbers or ids).'),
+      slides: z.array(z.string()).optional().describe('[Optional for delete_slide] Delete several slides at once (numbers or ids), instead of slide.'),
       text: z.string().optional().describe('[set_text, add_text_box, set_notes]'),
       row: z.number().int().min(1).optional().describe('[set_text in a table, table_rows]'),
       column: z.number().int().min(1).optional().describe('[set_text in a table]'),
@@ -615,13 +616,24 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           if (a.layout && !deckLayout && !predefined.includes(a.layout.toUpperCase())) {
             throw Error(`There's no layout "${a.layout}". Deck layouts: ${(presentation.layouts ?? []).map(l => `"${l.layoutProperties?.displayName}"`).join(', ')}`);
           }
-          await batch([{
-            createSlide: {
-              objectId: id, ...(a.position ? { insertionIndex: a.position - 1 } : {}),
-              slideLayoutReference: deckLayout ? { layoutId: deckLayout.objectId! } : { predefinedLayout: (a.layout ?? 'TITLE_AND_BODY').toUpperCase() },
-            },
-          }]);
+          const slides = presentation.slides ?? [];
+          const target = a.position ? Math.min(a.position - 1, slides.length) : slides.length;
+          // A slide can only be inserted next to slides using its layout's master (decks like the brand guide have
+          // several), so it's created after the last slide with that master, then moved where it should go
+          let createAt = target;
+          if (deckLayout) {
+            const layoutMaster = new Map((presentation.layouts ?? []).map(l => [l.objectId, l.layoutProperties?.masterObjectId]));
+            const master = deckLayout.layoutProperties?.masterObjectId;
+            const sameMaster = slides.map((s, i) => layoutMaster.get(s.slideProperties?.layoutObjectId ?? '') == master ? i : -1).filter(i => i >= 0);
+            if (sameMaster.length && !sameMaster.some(i => i == target - 1 || i == target)) createAt = sameMaster[sameMaster.length - 1] + 1;
+            else if (!sameMaster.length) createAt = 0;
+          }
+          await batch([
+            { createSlide: { objectId: id, insertionIndex: createAt, slideLayoutReference: deckLayout ? { layoutId: deckLayout.objectId! } : { predefinedLayout: (a.layout ?? 'TITLE_AND_BODY').toUpperCase() } } },
+            ...(createAt != target ? [{ updateSlidesPosition: { slideObjectIds: [id], insertionIndex: target > createAt ? target + 1 : target } }] : []),
+          ]);
           // Fill the new slide's placeholders by type, whatever the layout calls them
+          const notes: string[] = [];
           if (a.title || a.body) {
             const created = (await ws.getPresentation(presentationId)).slides?.find(s => s.objectId == id);
             const placeholder = (types: string[]) => created?.pageElements?.find(e => types.includes(e.shape?.placeholder?.type ?? ''));
@@ -630,9 +642,12 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
             const body = placeholder(['BODY', 'SUBTITLE']);
             if (a.title && title) requests.push({ insertText: { objectId: title.objectId!, insertionIndex: 0, text: a.title } });
             if (a.body && body) requests.push({ insertText: { objectId: body.objectId!, insertionIndex: 0, text: a.body } });
+            if (a.title && !title) notes.push('title');
+            if (a.body && !body) notes.push('body');
             if (requests.length) await batch(requests);
           }
-          return `Added slide ${id}. ${link}`;
+          const missing = notes.length ? ` This layout has no ${notes.join(' or ')} placeholder, so that text wasn't added: add it with add_text_box (check the layout's design with google_view_slide first).` : '';
+          return `Added slide ${id}.${missing} ${link}`;
         }
         case 'duplicate_slide': {
           const res = await batch([{ duplicateObject: { objectId: slideId() } }]);
@@ -646,8 +661,10 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           return `Moved slide ${a.slide} to position ${a.position}.`;
         }
         case 'delete_slide': {
-          await batch([{ deleteObject: { objectId: slideId() } }]);
-          return `Deleted slide ${a.slide}.`;
+          // Several at once in one request (ids are looked up first, so numbers don't shift while deleting)
+          const ids: string[] = (a.slides?.length ? a.slides : [a.slide]).map((s: string) => slideId(s));
+          await batch(ids.map(objectId => ({ deleteObject: { objectId } })));
+          return `Deleted ${ids.length} slide${ids.length == 1 ? '' : 's'}.`;
         }
         case 'delete_element': {
           await batch([{ deleteObject: { objectId: element().objectId! } }]);
@@ -748,7 +765,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
     'e.g. borders, conditional formatting, data validation, charts, sorting, deleting tabs or rows; GridRange uses 0-based indices and the tab id',
     (spreadsheetId, requests) => ws.call(() => api().sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } }), spreadsheetId));
   const slidesBatch = raw('slides_batch_update', 'Google Slides deck', MIME.slides,
-    'e.g. text styles, shape colours, grouping, alignment, table cell styles; sizes and positions in PT or EMU (12700 per pt)',
+    'e.g. text styles, shape colours, backgrounds, grouping, table cell styles. Text boxes are createShape with shapeType TEXT_BOX then insertText; delete slides or elements with deleteObject; object ids need 5+ characters; size and transform need a unit (PT or EMU, 12700 per pt)',
     (presentationId, requests) => ws.call(() => api().slides.presentations.batchUpdate({ presentationId, requestBody: { requests } }), presentationId));
 
   // ---------- Comments ----------

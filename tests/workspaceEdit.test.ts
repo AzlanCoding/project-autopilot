@@ -102,6 +102,7 @@ function workspace(files: { [id: string]: any }, overrides: any = {}) {
         delete: record('permissions.delete'),
       },
     },
+    slides: overrides.slides,
     docs: {
       documents: {
         get: async () => ({ data: { tabs: [{ tabProperties: { tabId: 't.0', title: 'Tab 1' }, documentTab: { body: { content: [{ startIndex: 0, endIndex: 1, sectionBreak: {} }, { startIndex: 1, endIndex: 7, paragraph: { elements: [{ textRun: { content: 'Hello\n' } }] } }] } } }] } }),
@@ -195,4 +196,36 @@ test("a public image Google can't fetch is downloaded and inserted from a tempor
   assert.deepEqual(uris, ['http://93.184.216.34/logo.png', 'https://lh3.googleusercontent.com/d/upload1']);
   assert.match(calls.find(c => c.startsWith('files.create'))!, /"name":"\[Sofia temporary image\] 93\.184\.216\.34"/);
   assert.match(last(calls), /^files\.delete .*"fileId":"upload1"/);
+});
+
+test('a slide with a layout from another master is created next to a slide using that master, then moved where it belongs', async () => {
+  const deck = { id: LONG('deck'), name: 'Brand Guide', mimeType: MIME.slides, webViewLink: 'https://docs.google.com/presentation/d/deck/edit' };
+  const presentation = {
+    layouts: [
+      { objectId: 'plain', layoutProperties: { displayName: 'Plain', masterObjectId: 'simple' } },
+      { objectId: 'branded', layoutProperties: { displayName: 'Header 02 (white)', masterObjectId: 'devfest' } },
+    ],
+    slides: [
+      { objectId: 's1', slideProperties: { layoutObjectId: 'branded' } },
+      { objectId: 's2', slideProperties: { layoutObjectId: 'branded' } },
+      { objectId: 's3', slideProperties: { layoutObjectId: 'plain' } },
+      { objectId: 's4', slideProperties: { layoutObjectId: 'plain' } },
+    ],
+  };
+  const batches: any[][] = [];
+  const { tools } = workspace({ [deck.id]: deck }, {
+    slides: { presentations: { get: async () => ({ data: presentation }), batchUpdate: async ({ requestBody }: any) => { batches.push(requestBody.requests); return { data: { replies: [] } }; } } },
+  });
+  // Appending to the end (after a "plain" slide) isn't allowed, so it's created after s2 and moved to the end
+  await tools.slides_edit.invoke({ url: deck.id, action: 'add_slide', layout: 'header 02 (white)' });
+  assert.equal(batches[0][0].createSlide.insertionIndex, 2);
+  assert.deepEqual(batches[0][0].createSlide.slideLayoutReference, { layoutId: 'branded' });
+  assert.equal(batches[0][1].updateSlidesPosition.insertionIndex, 5);
+  // Next to a slide with the same master already: created right there, not moved
+  await tools.slides_edit.invoke({ url: deck.id, action: 'add_slide', layout: 'Header 02 (white)', position: 2 });
+  assert.equal(batches[1][0].createSlide.insertionIndex, 1);
+  assert.equal(batches[1].length, 1);
+  // Several slides deleted in one request
+  await tools.slides_edit.invoke({ url: deck.id, action: 'delete_slide', slides: ['3', 's4'] });
+  assert.deepEqual(batches[2], [{ deleteObject: { objectId: 's3' } }, { deleteObject: { objectId: 's4' } }]);
 });
