@@ -74,7 +74,7 @@ How it works and its limits:
 *   Image search uses Model Studio's `web_search_image` in a separate request to `qwen3.8-flash` (`IMAGE_SEARCH_MODEL`), because DeepSeek models don't support it. Each search takes about 20 seconds. Tenor's GIF API was shut down in June 2026, so GIFs come from image search too.
 *   The Docs and Sheets APIs only work on Google files, so `.docx`, `.xlsx` and `.pptx` files are read through a temporary converted copy (deleted afterwards) and edited by converting them to a Google copy next to the original.
 *   Links can be Google links, file ids, Drive shortcuts (opened as their target) or short links that redirect to a Google file (e.g. `goo.gle/...`, followed without opening private addresses).
-*   Comments added through the API can't be attached to specific text in Docs, so Sofia quotes the passage. Docs suggestion mode isn't available in the API.
+*   Smart chips: Docs take people, date and Drive file chips (plus page breaks); Sheets take people and Drive file chips (Sheets has no date chips, and other links can't be chips). Docs comments can be attached to quoted text and assigned to someone; Sheets and Slides comments quote the passage in the text. Docs suggestion mode isn't available in the API.
 *   Files in a shared drive belong to the drive, so their ownership can't be transferred. Ownership of My Drive files moves immediately within `nyp-gdg.com`; people outside have to accept it.
 
 ## Known Issues

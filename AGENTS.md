@@ -125,6 +125,9 @@ shown when a call fails). The zod schema is sent as JSON Schema with `strict: tr
   build multi-place edits from the end backwards (see `docTableCellRequests`). Docs/Slides images need a public URL
   (`withPublicImage` shares private ones by link only during the insert); Slides image `contentUrl`s (30 minutes) can be
   passed to `createImage` to copy images.
+- The live Docs API is ahead of the installed `googleapis` types: `insertRichLink` (file chips), `insertComment`
+  (anchored, assignable) and `insertDropdown` work but aren't typed, so they're sent `as any`. Check the discovery
+  document (`https://docs.googleapis.com/$discovery/rest?version=v1`) for what the API accepts.
 - Web tools (`USE_WEB_TOOLS`, off by default) depend on the chat provider (`CHAT_PROVIDER`: DeepSeek when
   `CHAT_BASE_URL` is `https://api.deepseek.com`, otherwise Model Studio). Their instructions are added to the prompt at
   runtime by `webToolsPrompt()` (not in system.md) so Sofia is only told about tools she has, with the right names.

@@ -121,8 +121,6 @@ export interface ChatMedia {
 
 /** Tools that end Sofia's reply: `end_message`, and send tools called with `end_message: true`. */
 const endsReply = (name: string, args: any) => name == 'end_message' || args?.end_message === true;
-/** A reply can be stopped for new messages this many times (see `processChatv3`'s `hasNewMessages`). */
-const MAX_INTERRUPTS = 2;
 /** Output items of Model Studio's built-in tools (see `BUILTIN_TOOLS`). They have already run when they arrive. */
 const BUILTIN_TOOL_ITEMS = new Set(['web_search_call', 'web_extractor_call']);
 /** Short description of a built-in tool call for logs and the CLI, e.g. `web_search "NYP news"`. */
@@ -1621,13 +1619,12 @@ ${await message()}`,
       let ended = false;
       // Sofia gets one nudge per reply when she says she's about to do something but stops without a tool call
       let nudged = false;
-      // Times this reply was stopped for new messages, capped so a busy chat can't keep cutting her off
-      let interrupts = 0;
-
       // Messages to continue with if new ones arrived, checked at points where stopping the response loses nothing:
-      // after thinking, a sent WhatsApp message or a tool call that has run (never halfway through one)
+      // after thinking, a sent WhatsApp message or a tool call that has run (never halfway through one). There's no limit
+      // on how often: long tasks (e.g. building a deck, 15+ minutes) should take every new message into account, and in
+      // groups only messages that pass the reply decision stop her (see `messagesDuringReply`).
       const takeInterrupt = async (instance: AI): Promise<ResponseInputItem[] | null> => {
-        if (ended || interrupts >= MAX_INTERRUPTS || !hasNewMessages?.()) {
+        if (ended || !hasNewMessages?.()) {
           return null;
         }
         try {
@@ -1899,7 +1896,6 @@ ${await message()}`,
         chatHistory.push(...images);
         if (interrupted) {
           controller.abort();
-          interrupts++;
           instance.logger.info(`Stopped the response, continuing with ${interrupted.length} items that arrived during the reply`);
           buffer = "";
           chatHistory.push(...interrupted);

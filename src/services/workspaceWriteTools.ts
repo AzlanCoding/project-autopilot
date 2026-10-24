@@ -8,9 +8,9 @@ import { fetchPublic } from '../utils/safeFetch';
 import { GDG_SHARED_DRIVE_ID } from '../config/googleWorkspace';
 import type { ChatMedia } from './ai';
 import { GoogleWorkspace, MIME, OFFICE_TO_NATIVE } from './googleWorkspace';
-import { docTables, docTabs, fileKind, findSlide } from './workspaceFormat';
+import { docTables, docTabs, fileKind, findDocText, findSlide, parseA1Cell } from './workspaceFormat';
 import {
-  CellEdit, a1ToGridRange, docTableCellRequests, findElement, imageFormula, markdownToDocsRequests, parseRequests, samePlacement,
+  CellEdit, ChipSegment, a1ToGridRange, chipTextToDocsRequests, chipTextToSheetCell, docCellRange, parseChipText, docTableCellRequests, findElement, imageFormula, markdownToDocsRequests, parseRequests, samePlacement,
   sheetFormatRequest, slidePlacement, slideSetTextRequests,
 } from './workspaceEdit';
 
@@ -54,6 +54,13 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
     requestBody: { name: `[Sofia temporary image] ${label}`.slice(0, 200), parents: ['root'] },
     media: { mimeType: mime, body: Readable.from(buffer) }, fields: 'id',
   }))).id!;
+
+  /** Chip text with every [[file:...]] resolved to its Google link (short links and shortcuts followed). */
+  const chipSegments = async (text: string): Promise<ChipSegment[]> => Promise.all(parseChipText(text).map(async s => {
+    if (s.type != 'file') return s;
+    const file = await ws.getFile(s.link);
+    return { type: 'file' as const, link: googleFileLink(file.id!, file.mimeType) };
+  }));
 
   /**
    * Calls `fn` with a public URL for an image: a public link as is; a WhatsApp image (media_id) or Drive image shared as
@@ -288,17 +295,18 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const docsEdit = new ExtendedDynamicStructuredTool({
     name: 'docs_edit',
-    description: 'Edit a Google Doc. Read it with `docs_read_structure` first (and again after each edit, the indices change). Actions: replace_text (find and replace everywhere), insert_markdown (headings #, bullets -, numbered 1., **bold**, *italic*, [links](url); at the end, after a paragraph containing after_text, or at a paragraph\'s start index), rewrite_markdown (replace the whole tab\'s content, confirm first), delete_range, insert_image, insert_table, table_set_cells, table_rows / table_columns (insert or delete), table_merge. Tables are numbered from 1 as in `docs_read_structure`. For anything else use `docs_batch_update`.',
+    description: 'Edit a Google Doc. Read it with `docs_read_structure` first (and again after each edit, the indices change). Actions: insert_inline (text with smart chips inside a paragraph or table cell: [[person:email]], [[date:2026-11-21]] or [[date:2026-11-21T10:00]], [[file:link to a Drive file]]; e.g. after_text "Organiser:" or a table cell), insert_page_break, replace_text (find and replace everywhere), insert_markdown (headings #, bullets -, numbered 1., **bold**, *italic*, [links](url); at the end, after a paragraph containing after_text, or at a paragraph\'s start index), rewrite_markdown (replace the whole tab\'s content, confirm first), delete_range, insert_image, insert_table, table_set_cells, table_rows / table_columns (insert or delete), table_merge. Tables are numbered from 1 as in `docs_read_structure`. For anything else use `docs_batch_update`.',
     schema: z.object({
       url: fileUrl('Doc'),
-      action: z.enum(['replace_text', 'insert_markdown', 'rewrite_markdown', 'delete_range', 'insert_image', 'insert_table', 'table_set_cells', 'table_rows', 'table_columns', 'table_merge']).describe('[Required]'),
+      action: z.enum(['insert_inline', 'insert_page_break', 'replace_text', 'insert_markdown', 'rewrite_markdown', 'delete_range', 'insert_image', 'insert_table', 'table_set_cells', 'table_rows', 'table_columns', 'table_merge']).describe('[Required]'),
+      text: z.string().optional().describe('[insert_inline] Text with chips, e.g. "OIC: [[person:azlan@nyp-gdg.com]], see [[file:https://docs.google.com/...]]".'),
       tab: z.string().optional().describe("[Optional] The tab's title or id, defaults to the link's tab or the first tab."),
       find: z.string().optional().describe('[replace_text] Text to find.'),
       replace: z.string().optional().describe('[replace_text] The replacement (empty removes it).'),
       match_case: z.boolean().optional().describe('[Optional for replace_text] Defaults to false.'),
       markdown: z.string().optional().describe('[insert_markdown, rewrite_markdown] The content.'),
-      after_text: z.string().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert after the paragraph containing this text.'),
-      at: z.number().int().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert at this index (the start index of a paragraph from docs_read_structure). Defaults to the end.'),
+      after_text: z.string().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert after the paragraph containing this text. [insert_inline, insert_page_break] Insert right after this text (it can be inside a table cell).'),
+      at: z.number().int().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert at this index (the start index of a paragraph from docs_read_structure). [insert_inline, insert_page_break] Any index. Defaults to the end.'),
       start: z.number().int().optional().describe('[delete_range] Start index.'),
       end: z.number().int().optional().describe('[delete_range] End index (not included).'),
       image: z.string().optional().describe('[insert_image] A public image link, a Drive image link, or a WhatsApp image media_id.'),
@@ -350,8 +358,51 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
         return { index: bodyEnd, mode: 'end' };
       };
       const tableStart = (t: { startIndex: number }) => withTab({ index: t.startIndex });
+      /** An index inside the text: `at`, right after `after_text`, the end of a table cell's text, or null for the end. */
+      const inlineIndex = (): number | null => {
+        if (a.at != null) return a.at;
+        if (a.after_text) {
+          const found = findDocText(tab.body, a.after_text);
+          if (!found) throw Error(`"${a.after_text}" wasn't found in tab "${tab.title}".`);
+          return found.end;
+        }
+        if (a.table) {
+          const cell = pickTable().table.tableRows?.[(a.row ?? 1) - 1]?.tableCells?.[(a.column ?? 1) - 1];
+          if (!cell) throw Error(`Table ${a.table} has no cell at row ${a.row}, column ${a.column}.`);
+          return docCellRange(cell).end;
+        }
+        return null;
+      };
 
       switch (a.action) {
+        case 'insert_inline': {
+          if (!a.text) throw Error('insert_inline needs text.');
+          let index = inlineIndex();
+          let segments = await chipSegments(a.text);
+          let newParagraph = false;
+          if (index == null) {
+            // At the end of the document: a new paragraph, unless the last one is empty
+            const lastText = (tab.body[tab.body.length - 1]?.paragraph?.elements ?? []).map(e => e.textRun?.content ?? 'x').join('').trim();
+            index = bodyEnd - 1;
+            newParagraph = true;
+            if (lastText) segments = [{ type: 'text', text: '\n' }, ...segments];
+          }
+          const requests = chipTextToDocsRequests(segments, index, tabId);
+          if (newParagraph) {
+            // A new paragraph copies the style of the one before (e.g. a list item or heading), so make it normal text
+            const length = segments.reduce((n, s) => n + (s.type == 'text' ? s.text.length : 1), 0);
+            const range = withTab({ startIndex: index + (segments[0]?.type == 'text' && segments[0].text == '\n' ? 1 : 0), endIndex: index + length + 1 });
+            requests.push({ deleteParagraphBullets: { range } }, { updateParagraphStyle: { range, paragraphStyle: { namedStyleType: 'NORMAL_TEXT' }, fields: 'namedStyleType' } });
+          }
+          await batch(requests);
+          const chips = segments.filter(s => s.type != 'text').length;
+          return `Inserted the text${chips ? ` with ${chips} smart chip${chips == 1 ? '' : 's'}` : ''} in "${file.name}". ${file.webViewLink}`;
+        }
+        case 'insert_page_break': {
+          const index = inlineIndex();
+          await batch([{ insertPageBreak: index == null ? { endOfSegmentLocation: withTab({}) } : { location: withTab({ index }) } }]);
+          return `Inserted a page break in "${file.name}".`;
+        }
         case 'replace_text': {
           if (!a.find) throw Error('replace_text needs find.');
           const res = await batch([{ replaceAllText: { containsText: { text: a.find, matchCase: !!a.match_case }, replaceText: a.replace ?? '', ...(tabId ? { tabsCriteria: { tabIds: [tabId] } } : {}) } }]);
@@ -436,10 +487,11 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const sheetsEdit = new ExtendedDynamicStructuredTool({
     name: 'sheets_edit',
-    description: 'Edit a Google Sheet. Read it with `sheets_read` first. Actions: write (values or formulas into a range), append (rows after the last filled row), clear, add_tab (optionally with values from A1), rename_tab, merge / unmerge (a range), format (bold, colours, number format, alignment...), column_width, freeze (rows at the top), insert_image (an =IMAGE() formula in a cell, the image link must stay public). For anything else use `sheets_batch_update`.',
+    description: 'Edit a Google Sheet. Read it with `sheets_read` first. Actions: write_chips (one cell\'s text with smart chips: [[person:email]] and [[file:link to a Drive file]]; Sheets has no date chips), write (values or formulas into a range), append (rows after the last filled row), clear, add_tab (optionally with values from A1), rename_tab, merge / unmerge (a range), format (bold, colours, number format, alignment...), column_width, freeze (rows at the top), insert_image (an =IMAGE() formula in a cell, the image link must stay public). For anything else use `sheets_batch_update`.',
     schema: z.object({
       url: fileUrl('Sheet'),
-      action: z.enum(['write', 'append', 'clear', 'add_tab', 'rename_tab', 'merge', 'unmerge', 'format', 'column_width', 'freeze', 'insert_image']).describe('[Required]'),
+      action: z.enum(['write_chips', 'write', 'append', 'clear', 'add_tab', 'rename_tab', 'merge', 'unmerge', 'format', 'column_width', 'freeze', 'insert_image']).describe('[Required]'),
+      text: z.string().optional().describe('[write_chips] e.g. "[[person:azlan@nyp-gdg.com]]" or "See [[file:https://docs.google.com/...]] for details".'),
       tab: z.string().optional().describe("[Optional] Tab name, id or position, defaults to the link's tab or the first tab. For add_tab, the new tab's name."),
       range: z.string().optional().describe('[write, clear, merge, unmerge, format, column_width] Cells, e.g. "A1:D10" (write: where the values start, e.g. "B2").'),
       values: grid2d.optional().describe('[write, add_tab] Rows of values; text starting with = is a formula.'),
@@ -451,7 +503,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       align: z.enum(['LEFT', 'CENTER', 'RIGHT']).optional(), wrap: z.boolean().optional(),
       width_px: z.number().int().optional().describe('[column_width] Width in pixels.'),
       frozen_rows: z.number().int().min(0).optional().describe('[freeze] Rows to freeze at the top.'),
-      cell: z.string().optional().describe('[insert_image] The cell, e.g. "A1".'),
+      cell: z.string().optional().describe('[insert_image, write_chips] The cell, e.g. "B4".'),
       image: z.string().optional().describe('[insert_image] A public image link.'),
     }),
     func: async (args) => {
@@ -476,6 +528,12 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       const inTab = (range: string) => `'${title.replace(/'/g, "''")}'!${range}`;
       const needRange = () => { if (!a.range) throw Error(`${a.action} needs range, e.g. "A1:D10".`); return a.range as string; };
       switch (a.action) {
+        case 'write_chips': {
+          if (!a.cell || !a.text) throw Error('write_chips needs cell and text.');
+          const { row, col } = parseA1Cell(a.cell);
+          await batch([{ updateCells: { range: { sheetId, startRowIndex: row, endRowIndex: row + 1, startColumnIndex: col, endColumnIndex: col + 1 }, rows: [{ values: [chipTextToSheetCell(await chipSegments(a.text))] }], fields: 'userEnteredValue,chipRuns' } } as any]);
+          return `Wrote ${a.cell} in "${title}" with smart chips.`;
+        }
         case 'write': {
           if (!a.values?.length) throw Error('write needs values.');
           const res = await ws.call(() => values.update({ spreadsheetId, range: inTab(needRange()), valueInputOption: 'USER_ENTERED', requestBody: { values: a.values } }));
@@ -772,16 +830,17 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const comment = new ExtendedDynamicStructuredTool({
     name: 'google_comment',
-    description: 'Add a comment to a Google Doc, Sheet or Slides deck, reply to a comment (ids from google_read_comments), or resolve one. Comments added with the API can\'t be attached to specific text, so put the passage you mean in quote.',
+    description: 'Add a comment to a Google Doc, Sheet or Slides deck, reply to a comment (ids from google_read_comments), or resolve one. In Docs, quote attaches the comment to that text (like highlighting it), and assign_to assigns it to someone. In Sheets and Slides the quote is written into the comment.',
     schema: z.object({
       url: fileUrl(),
       text: z.string().optional().describe('[Required unless only resolving] The comment or reply.'),
       quote: z.string().optional().describe('[Optional] The passage the comment is about.'),
       reply_to: z.string().optional().describe('[Optional] The comment id to reply to.'),
       resolve: z.boolean().optional().describe('[Optional, with reply_to] Resolve the comment.'),
+      assign_to: z.string().optional().describe('[Optional, Docs] Email of the person to assign the comment to (a task for them).'),
     }),
     func: async (args) => {
-      const { url, text, quote, reply_to, resolve } = args as any;
+      const { url, text, quote, reply_to, resolve, assign_to } = args as any;
       const file = await ws.getFile(url);
       if (reply_to) {
         await ws.call(() => api().drive.replies.create({
@@ -791,6 +850,19 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
         return `${resolve ? 'Resolved' : 'Replied to'} comment ${reply_to} on "${file.name}".`;
       }
       if (!text) throw Error('A new comment needs text.');
+      // Docs can attach a comment to a range of text (and assign it), anywhere in any tab
+      if (file.mimeType == MIME.doc && (quote || assign_to)) {
+        const doc = await ws.getDoc(file.id!);
+        for (const tab of docTabs(doc)) {
+          const found = quote ? findDocText(tab.body, quote) : { start: 1, end: 2 };
+          if (!found) continue;
+          const res: any = await ws.call(() => api().docs.documents.batchUpdate({ documentId: file.id!, requestBody: { requests: [{
+            insertComment: { range: { startIndex: found.start, endIndex: found.end, ...(tab.id && docTabs(doc).length > 1 ? { tabId: tab.id } : {}) }, content: text, ...(assign_to ? { assigneeEmailAddress: assign_to } : {}) },
+          } as any] } }), file.id!);
+          const id = res.replies?.[0]?.insertComment?.commentThread?.commentId;
+          return `Commented on ${quote ? `"${quote}"` : 'the doc'} in "${file.name}"${assign_to ? `, assigned to ${assign_to}` : ''} (comment ${id}).`;
+        }
+      }
       const res = await ws.call(() => api().drive.comments.create({ fileId: file.id!, fields: 'id', requestBody: { content: quote ? `On "${quote}": ${text}` : text } }), file.id!);
       return `Commented on "${file.name}" (comment ${res.id}).`;
     }

@@ -27,7 +27,7 @@ flowchart TD
     U -- yes --> K[Typing on, build prompt + history, start reply]
     K --> L[Model request]
     L --> S{Flagged at a safe point?<br/>thinking done / message sent / tool run}
-    S -- yes, new messages pass the group check,<br/>under 2 stops --> S2[Stop the response, keep what's done,<br/>add the new messages] --> L
+    S -- yes, and new messages pass the group check --> S2[Stop the response, keep what's done,<br/>add the new messages] --> L
     S -- no --> M{Response ended with}
     M -- tool call that ends the reply --> Z[Reply done]
     M -- other tool calls --> N[Add messages that arrived during the reply] --> L
@@ -113,7 +113,7 @@ a WhatsApp message has been sent, or a tool call has run (never halfway through 
   it (the unsent rest is dropped),
 - the new messages with the "arrived while you were replying" note.
 
-A reply is stopped at most twice (`MAX_INTERRUPTS`). In group chats `messagesDuringReply` runs `decideGroupReply` on the
+There's no limit on how often a reply is stopped, so long tasks keep taking new messages into account. In group chats `messagesDuringReply` runs `decideGroupReply` on the
 new messages first and returns nothing if Sofia wouldn't reply to them, so the response carries on.
 
 When a request ends:
@@ -135,5 +135,4 @@ unseen messages and stops.
 
 - A reply ended by a tool (`end_message`, or a sticker with `end_message: true`) isn't stopped, so anything that arrived
   goes to the pending run and gets its own reply.
-- After 2 stops, further messages go to the pending run.
 - Stopping doesn't wait for the sender to finish typing, so a third message right after can cause another stop.

@@ -40,10 +40,14 @@ export function docTabs(doc: docs_v1.Schema$Document): { id: string, title: stri
   return tabs;
 }
 
-/** A paragraph's text, with links as Markdown links and images as `[image]`. */
+/** A paragraph's text, with links as Markdown links, images as `[image]` and smart chips (people, dates, files) shown. */
 function paragraphText(p: docs_v1.Schema$Paragraph, { links = true, images = true } = {}): string {
-  return (p.elements ?? []).map(e => {
+  return (p.elements ?? []).map((e: any) => {
     if (e.inlineObjectElement) return images ? '[image]' : '';
+    if (e.person) return `[@${e.person.personProperties?.name ?? e.person.personProperties?.email} <${e.person.personProperties?.email}>]`;
+    if (e.dateElement) return `[date: ${e.dateElement.dateElementProperties?.displayText ?? e.dateElement.dateElementProperties?.timestamp}]`;
+    if (e.richLink) return `[file: ${e.richLink.richLinkProperties?.title ?? 'link'}${links ? ` ${e.richLink.richLinkProperties?.uri}` : ''}]`;
+    if (e.pageBreak) return '[page break]';
     const content = e.textRun?.content ?? '';
     const url = e.textRun?.textStyle?.link?.url;
     return links && url && content.trim() ? `[${content.replace(/\n$/, '')}](${url})${content.endsWith('\n') ? '\n' : ''}` : content;
@@ -87,6 +91,39 @@ export function docToMarkdown(body: StructuralElement[]): string {
     }
   }
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * Finds `text` in a Doc tab (paragraphs and table cells, case-insensitive) and returns its document range, or null.
+ * Chips and images count as one character, so the indices match the document.
+ */
+export function findDocText(body: StructuralElement[], text: string): { start: number, end: number } | null {
+  const needle = text.toLowerCase();
+  const search = (elements: StructuralElement[]): { start: number, end: number } | null => {
+    for (const el of elements) {
+      if (el.paragraph) {
+        let chars = '';
+        const indices: number[] = [];
+        for (const e of el.paragraph.elements ?? []) {
+          const content = e.textRun?.content ?? '\uFFFC';
+          for (let i = 0; i < content.length; i++) {
+            chars += content[i];
+            indices.push((e.startIndex ?? 0) + i);
+          }
+        }
+        const at = chars.toLowerCase().indexOf(needle);
+        if (at >= 0 && needle) return { start: indices[at], end: indices[at + needle.length - 1] + 1 };
+      }
+      for (const row of el.table?.tableRows ?? []) {
+        for (const cell of row.tableCells ?? []) {
+          const found = search(cell.content ?? []);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  };
+  return search(body);
 }
 
 /** The tables in a Doc tab's body, in order (tables inside tables aren't counted). */

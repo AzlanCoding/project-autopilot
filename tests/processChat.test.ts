@@ -283,14 +283,15 @@ test('a message that arrives during tool calls stops after the tool that has run
   assert.deepEqual(summary(requests[1]).slice(1), ['function_call', 'function_call_output', ...summary(arrived)]);
 });
 
-test('a reply is stopped at most twice, and not at all if no new messages are returned', async () => {
+test('a reply is stopped every time new messages arrive (no limit), and not at all if no new messages are returned', async () => {
   const { ai, requests } = fakeAI([
     [reasoning('1'), message('never sent')],
     [reasoning('2'), message('never sent either')],
-    [reasoning('3'), message('Finally replying')],
+    [reasoning('3'), message('nor this')],
+    [reasoning('4'), message('Finally replying')],
   ]);
-  assert.deepEqual(await runInterrupted(ai, [true, true, true, true]), ['Finally replying']);
-  assert.equal(requests.length, 3);
+  assert.deepEqual(await runInterrupted(ai, [true, true, true]), ['Finally replying']);
+  assert.equal(requests.length, 4);
 
   // e.g. in a group chat, where the new messages weren't meant for Sofia
   const quiet = fakeAI([[reasoning('1'), message('Normal reply')]]);

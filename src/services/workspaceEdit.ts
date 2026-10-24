@@ -262,3 +262,89 @@ export function parseRequests(json: string): object[] {
   }
   return requests;
 }
+
+// ---------- Smart chips ----------
+
+/** Text with chips: `[[person:email]]`, `[[date:2026-11-21]]` / `[[date:2026-11-21T10:00]]` (Singapore time), `[[file:link]]`. */
+export type ChipSegment =
+  | { type: 'text', text: string }
+  | { type: 'person', email: string }
+  | { type: 'date', date: string, time: boolean }
+  | { type: 'file', link: string };
+
+export function parseChipText(input: string): ChipSegment[] {
+  const segments: ChipSegment[] = [];
+  let last = 0;
+  for (const m of input.matchAll(/\[\[(person|date|file):\s*([^\]]+?)\s*\]\]/gi)) {
+    if (m.index! > last) segments.push({ type: 'text', text: input.slice(last, m.index) });
+    const kind = m[1].toLowerCase();
+    const value = m[2];
+    if (kind == 'person') {
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) throw Error(`"${value}" isn't an email address for a person chip.`);
+      segments.push({ type: 'person', email: value });
+    }
+    else if (kind == 'date') {
+      const d = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?$/.exec(value);
+      if (!d) throw Error(`"${value}" isn't a date like 2026-11-21 or 2026-11-21T10:00.`);
+      segments.push({ type: 'date', date: value.replace(' ', 'T'), time: !!d[2] });
+    }
+    else {
+      segments.push({ type: 'file', link: value });
+    }
+    last = m.index! + m[0].length;
+  }
+  if (last < input.length) segments.push({ type: 'text', text: input.slice(last) });
+  return segments;
+}
+
+/**
+ * A date chip's properties. With a time it shows in Singapore time with the zone (Docs only accepts a time zone together
+ * with that format, and without one it shows UTC). A date alone is stored at midday UTC so it's the same day everywhere.
+ */
+export function dateChipProperties(date: string, time: boolean): object {
+  if (time) {
+    return { timestamp: new Date(`${date}:00+08:00`).toISOString(), timeZoneId: 'Asia/Singapore', dateFormat: 'DATE_FORMAT_MONTH_DAY_YEAR_ABBREVIATED', timeFormat: 'TIME_FORMAT_HOUR_MINUTE_TIMEZONE' };
+  }
+  return { timestamp: `${date}T12:00:00Z`, dateFormat: 'DATE_FORMAT_MONTH_DAY_YEAR_ABBREVIATED', timeFormat: 'TIME_FORMAT_DISABLED' };
+}
+
+/**
+ * Requests inserting text with chips at `index` in a Doc, in order. Each chip takes one index, so the position moves on
+ * by the text's length or by one. File links must already be resolved to their Google link.
+ */
+export function chipTextToDocsRequests(segments: ChipSegment[], index: number, tabId?: string): docs_v1.Schema$Request[] {
+  const requests: any[] = [];
+  let at = index;
+  for (const s of segments) {
+    const location = { index: at, ...(tabId ? { tabId } : {}) };
+    if (s.type == 'text') {
+      if (!s.text) continue;
+      requests.push({ insertText: { location, text: s.text } });
+      at += s.text.length;
+      continue;
+    }
+    if (s.type == 'person') requests.push({ insertPerson: { location, personProperties: { email: s.email } } });
+    else if (s.type == 'date') requests.push({ insertDate: { location, dateElementProperties: dateChipProperties(s.date, s.time) } });
+    else requests.push({ insertRichLink: { location, richLinkProperties: { uri: s.link } } });
+    at += 1;
+  }
+  return requests;
+}
+
+/** A Sheets cell with people and Drive file chips: each chip is an @ in the text with a chip run at its position. */
+export function chipTextToSheetCell(segments: ChipSegment[]): sheets_v4.Schema$CellData {
+  let text = '';
+  const chipRuns: any[] = [];
+  for (const s of segments) {
+    if (s.type == 'text') {
+      text += s.text;
+      continue;
+    }
+    if (s.type == 'date') {
+      throw Error('Sheets has no date chips: write the date as a normal value (e.g. 21/11/2026) instead.');
+    }
+    chipRuns.push({ startIndex: text.length, chip: s.type == 'person' ? { personProperties: { email: s.email } } : { richLinkProperties: { uri: s.link } } });
+    text += '@';
+  }
+  return { userEnteredValue: { stringValue: text }, chipRuns } as any;
+}

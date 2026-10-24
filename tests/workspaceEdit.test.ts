@@ -229,3 +229,42 @@ test('a slide with a layout from another master is created next to a slide using
   await tools.slides_edit.invoke({ url: deck.id, action: 'delete_slide', slides: ['3', 's4'] });
   assert.deepEqual(batches[2], [{ deleteObject: { objectId: 's3' } }, { deleteObject: { objectId: 's4' } }]);
 });
+
+test('smart chip text becomes Docs requests in order, each chip taking one index', async () => {
+  const { parseChipText, chipTextToDocsRequests, chipTextToSheetCell, dateChipProperties } = await import('../src/services/workspaceEdit');
+  const segments = parseChipText('OIC: [[person:azlan@nyp-gdg.com]] on [[date:2026-11-21T10:00]] (see [[file:https://docs.google.com/document/d/abc/edit]])');
+  assert.deepEqual(segments.map(s => s.type), ['text', 'person', 'text', 'date', 'text', 'file', 'text']);
+  assert.deepEqual(chipTextToDocsRequests(segments, 100, 't.1'), [
+    { insertText: { location: { index: 100, tabId: 't.1' }, text: 'OIC: ' } },
+    { insertPerson: { location: { index: 105, tabId: 't.1' }, personProperties: { email: 'azlan@nyp-gdg.com' } } },
+    { insertText: { location: { index: 106, tabId: 't.1' }, text: ' on ' } },
+    { insertDate: { location: { index: 110, tabId: 't.1' }, dateElementProperties: dateChipProperties('2026-11-21T10:00', true) } },
+    { insertText: { location: { index: 111, tabId: 't.1' }, text: ' (see ' } },
+    { insertRichLink: { location: { index: 117, tabId: 't.1' }, richLinkProperties: { uri: 'https://docs.google.com/document/d/abc/edit' } } },
+    { insertText: { location: { index: 118, tabId: 't.1' }, text: ')' } },
+  ]);
+  // A time shows in Singapore time with the zone; a date alone is midday UTC, the same day everywhere
+  assert.deepEqual(dateChipProperties('2026-11-21T10:00', true), { timestamp: '2026-11-21T02:00:00.000Z', timeZoneId: 'Asia/Singapore', dateFormat: 'DATE_FORMAT_MONTH_DAY_YEAR_ABBREVIATED', timeFormat: 'TIME_FORMAT_HOUR_MINUTE_TIMEZONE' });
+  assert.deepEqual(dateChipProperties('2026-11-21', false), { timestamp: '2026-11-21T12:00:00Z', dateFormat: 'DATE_FORMAT_MONTH_DAY_YEAR_ABBREVIATED', timeFormat: 'TIME_FORMAT_DISABLED' });
+  assert.throws(() => parseChipText('[[person:Azlan]]'), /isn't an email/);
+  assert.throws(() => parseChipText('[[date:next friday]]'), /isn't a date/);
+
+  // Sheets: each chip is an @ with a chip run at its position; no date chips
+  assert.deepEqual(chipTextToSheetCell(parseChipText('See [[file:https://docs.google.com/document/d/abc/edit]] or ask [[person:mary@nyp-gdg.com]]')), {
+    userEnteredValue: { stringValue: 'See @ or ask @' },
+    chipRuns: [{ startIndex: 4, chip: { richLinkProperties: { uri: 'https://docs.google.com/document/d/abc/edit' } } }, { startIndex: 13, chip: { personProperties: { email: 'mary@nyp-gdg.com' } } }],
+  });
+  assert.throws(() => chipTextToSheetCell(parseChipText('[[date:2026-11-21]]')), /Sheets has no date chips/);
+});
+
+test('text is found in paragraphs and table cells with document indices, chips counting as one character', async () => {
+  const { findDocText } = await import('../src/services/workspaceFormat');
+  const body: any[] = [
+    { startIndex: 1, endIndex: 20, paragraph: { elements: [{ startIndex: 1, textRun: { content: 'Organiser: ' } }, { startIndex: 12, person: { personProperties: { email: 'a@b.c' } } }, { startIndex: 13, textRun: { content: ' (OIC)\n' } }] } },
+    { startIndex: 20, endIndex: 40, table: { tableRows: [{ tableCells: [{ content: [{ startIndex: 22, paragraph: { elements: [{ startIndex: 22, textRun: { content: 'Venue\n' } }] } }] }, { content: [{ startIndex: 29, paragraph: { elements: [{ startIndex: 29, textRun: { content: 'TBC\n' } }] } }] }] }] } },
+  ];
+  assert.deepEqual(findDocText(body, 'Organiser:'), { start: 1, end: 11 });
+  assert.deepEqual(findDocText(body, '(oic)'), { start: 14, end: 19 }); // after the chip, case-insensitive
+  assert.deepEqual(findDocText(body, 'TBC'), { start: 29, end: 32 });
+  assert.equal(findDocText(body, 'nowhere'), null);
+});
