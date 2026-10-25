@@ -11,3 +11,4 @@ tests
 .vscode
 *.log
 wa-logs.txt
+logs/

@@ -217,5 +217,5 @@ When a change depends on how Model Studio behaves, test it for real before relyi
 found this way). Write throwaway scripts outside the repo (`tsc` compiles every `.ts` in it) and run them with
 `npx ts-node --transpile-only -P tsconfig.json <script>` from the repo root, importing from the repo's `src/` (import
 packages such as `openai` by their path in the repo's `node_modules`, since they resolve from the script's folder). Keep them small: they spend
-real API credit. Production logs are pino JSON in `log.log` inside the container
-(`docker compose exec -T sofia cat log.log`).
+real API credit. Production logs are pino JSON in `logs/` on the host (mounted into the
+container, one file a day, `logs/current.log` is today's).

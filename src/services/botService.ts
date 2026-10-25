@@ -245,7 +245,7 @@ export class SofiaBot implements ChatAdapter {
           }
 
           if (connection === 'open') {
-            // The logger writes to log.log, so print to the console too to show up in `docker compose logs -f sofia`.
+            // The logger writes to files in logs/, so print to the console too to show up in `docker compose logs -f sofia`.
             console.log(`[${new Date().toISOString()}] Sofia is connected to WhatsApp and ready (${this.sock?.user?.id}).`);
             this.logger.info(`Connected to WhatsApp as ${this.sock?.user?.id}`);
           }

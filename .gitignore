@@ -8,3 +8,4 @@ config/*
 volumes/*
 *.log
 .claude
+logs/
