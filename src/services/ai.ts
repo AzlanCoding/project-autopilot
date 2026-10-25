@@ -22,25 +22,30 @@ import type { PreProccessChatMsg } from './botService';
 import type { Sticker } from '../models/Sticker';
 import type { PollResults } from './pollService';
 import { ModelImage, toModelImage } from '../utils/media';
+import { parsePages, pdfPageCount, pdfPageImage, readPdfText } from '../utils/pdf';
 import { chatContext } from './chatContext';
+import { ExtendedDynamicStructuredTool, isToolImageResult, ToolImageResult } from '../utils/tool';
 import { aboutToActProbability, replyEnding, UNFINISHED_NUDGE, UNFINISHED_THRESHOLD } from './unfinishedReply';
 import getCalendarEvents from '../utils/getCalendarEvents';
 import { Logger } from 'pino';
 import { EasyInputMessage, ResponseCreateParamsStreaming, ResponseFunctionToolCall, ResponseInputItem, ResponseReasoningItem } from 'openai/resources/responses/responses.js';
 import { BUILTIN_TOOLS, CHAT_API_KEY, CHAT_BASE_URL, CHAT_MODEL, CHAT_PROVIDER, MODELSTUDIO_BASE_URL, USE_WEB_TOOLS } from '../config/modelStudio';
 import { formatPage, formatSearchResults, webFetch, webSearch } from './webTools';
+import { WORKSPACE_ENABLED } from '../config/googleWorkspace';
+import { GoogleWorkspace, MIME } from './googleWorkspace';
+import { isDriveId, toGoogleLink } from '../utils/googleUrls';
+import { createWorkspaceReadTools } from './workspaceTools';
+import { createWorkspaceWriteTools } from './workspaceWriteTools';
+import { createFileTools, ExtractedImages } from './fileTools';
+import { createImageTools } from './imageTools';
+import { createDriveFileTool, createFetchUrlTool } from './textFileTools';
 import moment from 'moment-timezone';
 import { SCHEDULE_TIMEZONE } from './scheduledTaskService';
 
 export { CHAT_MODEL };
+export { ExtendedDynamicStructuredTool, isToolImageResult };
+export type { ToolImageResult };
 
-export class ExtendedDynamicStructuredTool extends DynamicStructuredTool {
-  usage_str: string
-  constructor(fields: ConstructorParameters<typeof DynamicStructuredTool>[0], usage_str: string) {
-    super(fields as any);
-    this.usage_str = usage_str;
-  }
-}
 
 /**
  * Chat platform operations needed by the chat tools. Implemented by SofiaBot (WhatsApp) and by the CLI test harness.
@@ -51,37 +56,73 @@ export interface ChatAdapter {
    * (quoting an "I am an AI Agent" message), only the first message of a send is labelled.
    */
   sendMessage(id: string, text: string, label?: boolean): Promise<void>;
+  /** Send a file or image (images as photos, everything else as a document) to a user id, group id or WhatsApp jid. */
+  sendFile(id: string, file: OutgoingFile): Promise<void>;
   /** Send a sticker or GIF to a user id, group id (ending with `@g.us`) or WhatsApp jid. */
   sendStickerGif(id: string, sticker: Sticker): Promise<void>;
-  /** Download an image, sticker, GIF or video by the media id shown in the chat history. */
+  /** Download an image, sticker, GIF, video or document by the media id shown in the chat history. */
   getMedia(mediaId: string): Promise<ChatMedia>;
   /** Send a poll to a user id, group id (ending with `@g.us`) or WhatsApp jid, returns its poll id. */
   sendPoll(id: string, poll: { question: string, options: string[], multiple: boolean }): Promise<string>;
   /** The current votes of a poll by the poll id shown in the chat history, or null if the poll isn't known. */
   getPollResults(pollId: string): Promise<PollResults | null>;
   listGroups(): Promise<{ id: string, name: string }[]>;
+  /** A group chat's name, description and participants (matched to users where known). */
+  getGroupInfo(groupId: string): Promise<GroupInfo>;
   /** Load the chat history with a user id or group id, oldest first. */
   loadChatById(id: string): Promise<PreProccessChatMsg[]>;
+}
+
+export interface OutgoingFile {
+  buffer: Buffer,
+  mime: string,
+  fileName: string,
+  caption?: string,
+}
+
+export interface GroupParticipantInfo {
+  /** The user's name, `You (Sofia)`, or `Unknown (<last 4 digits>)` for people who aren't users. */
+  name: string,
+  userId: string | null,
+  description: string | null,
+  admin: boolean,
+}
+
+export interface GroupInfo {
+  id: string,
+  name: string,
+  description: string,
+  participants: GroupParticipantInfo[],
+}
+
+/** Descriptions are cut to this length so a large group doesn't fill the prompt. */
+const GROUP_DESCRIPTION_MAX_CHARS = 200;
+const cut = (text: string, max: number) => text.length > max ? `${text.slice(0, max).trimEnd()}...` : text;
+
+/** A group's info for the system prompt and `get_group_info`. */
+export function formatGroupInfo(info: GroupInfo): string {
+  const people = info.participants.map(p => {
+    const id = p.userId ? ` (user ID ${p.userId})` : '';
+    const description = p.description?.trim() ? `: ${cut(p.description.trim().replace(/\s+/g, ' '), GROUP_DESCRIPTION_MAX_CHARS)}` : '';
+    return `- ${p.name}${id}${p.admin ? ' [admin]' : ''}${description}`;
+  });
+  return `Group Chat: ${info.name} (${info.id})\n` +
+    `Group Description: ${info.description.trim() ? info.description.trim() : '(none)'}\n` +
+    `Participants (${info.participants.length}):\n${people.join('\n')}`;
 }
 
 export interface ChatMedia {
   buffer: Buffer,
   mime: string,
-  kind: 'image' | 'sticker' | 'gif' | 'video',
+  kind: 'image' | 'sticker' | 'gif' | 'video' | 'document',
+  /** Documents only */
+  fileName?: string,
 }
 
 /** Returned by tools that show the model an image (`view_media`), the image is added after the tool output. */
-export interface ToolImageResult {
-  text: string,
-  image: ModelImage,
-}
-
-const isToolImageResult = (r: any): r is ToolImageResult => !!r && typeof r == 'object' && typeof r.text == 'string' && !!r.image?.dataUrl;
 
 /** Tools that end Sofia's reply: `end_message`, and send tools called with `end_message: true`. */
 const endsReply = (name: string, args: any) => name == 'end_message' || args?.end_message === true;
-/** A reply can be stopped for new messages this many times (see `processChatv3`'s `hasNewMessages`). */
-const MAX_INTERRUPTS = 2;
 /** Output items of Model Studio's built-in tools (see `BUILTIN_TOOLS`). They have already run when they arrive. */
 const BUILTIN_TOOL_ITEMS = new Set(['web_search_call', 'web_extractor_call']);
 /** Short description of a built-in tool call for logs and the CLI, e.g. `web_search "NYP news"`. */
@@ -154,6 +195,13 @@ export default class AI {
   // Timetable Tool
   timetableTool: ExtendedDynamicStructuredTool;
 
+  /** Sofia's Google Workspace account, set when it's signed in (`pnpm google-auth`). */
+  workspace?: GoogleWorkspace;
+  workspaceTools: ExtendedDynamicStructuredTool[] = [];
+  /** Images from `extract_images`, generate_image, edit_image and material_icon, by id (img_1...). */
+  extractedImages = new ExtractedImages();
+  imageTools: ExtendedDynamicStructuredTool[] = [];
+
   // Web Tools on DeepSeek (Model Studio's are built-in tools, see `builtinTools`)
   webSearchTool: ExtendedDynamicStructuredTool;
   webFetchTool: ExtendedDynamicStructuredTool;
@@ -169,6 +217,11 @@ export default class AI {
   sendPollTool?: ExtendedDynamicStructuredTool;
   readPollTool?: ExtendedDynamicStructuredTool;
   listGroupsTool?: ExtendedDynamicStructuredTool;
+  getGroupInfoTool?: ExtendedDynamicStructuredTool;
+  readPdfTool?: ExtendedDynamicStructuredTool;
+  /** send_file, extract_images */
+  fileTools: ExtendedDynamicStructuredTool[] = [];
+  viewPdfPageTool?: ExtendedDynamicStructuredTool;
   readChatHistoryTool?: ExtendedDynamicStructuredTool;
   chatAdapter?: ChatAdapter;
 
@@ -723,12 +776,32 @@ export default class AI {
       }
     }, "{url: string}");
 
+    if (WORKSPACE_ENABLED) {
+      this.workspace = new GoogleWorkspace(this.logger);
+      this.workspaceTools = [
+        ...createWorkspaceReadTools(this.workspace),
+        // WhatsApp images (by media_id) can be inserted once the chat tools are registered
+        ...createWorkspaceWriteTools(this.workspace, { getChatMedia: id => this.chatAdapter!.getMedia(id), getImage: id => this.extractedImages.get(id) }),
+        createDriveFileTool(this.workspace),
+      ];
+    }
+
+    // Image generation/editing (Qwen-Image) and Material icons; results go in extractedImages (img_N)
+    this.imageTools = createImageTools({
+      extracted: this.extractedImages, workspace: this.workspace,
+      getChatMedia: id => this.chatAdapter!.getMedia(id),
+      onImages: (count, model) => this.logger.info(`Made ${count} image${count == 1 ? '' : 's'} with ${model}`),
+    });
+
     this.tools = [
       ...(this.useWebTools && this.chatProvider == 'deepseek' ? [this.webSearchTool, this.webFetchTool] : []),
+      ...this.imageTools,
+      createFetchUrlTool(),
+      ...this.workspaceTools,
       this.getCurrentTimeTool,
       this.memoryWriteTool, this.memoryUpdateTool, this.memoryQueryTool, this.memoryQueryByUserTool, this.memoryDeleteTool,
-      this.assignmentCreateTool/*, this.assignmentGetTool*/, this.assignmentListTool, this.assignmentUpdateTool, this.assignmentDeleteTool,
-      this.assessmentCreateTool/*, this.assessmentGetTool*/, this.assessmentListTool, this.assessmentUpdateTool, this.assessmentDeleteTool,
+      // this.assignmentCreateTool/*, this.assignmentGetTool*/, this.assignmentListTool, this.assignmentUpdateTool, this.assignmentDeleteTool,
+      // this.assessmentCreateTool/*, this.assessmentGetTool*/, this.assessmentListTool, this.assessmentUpdateTool, this.assessmentDeleteTool,
       this.userListTool,
       this.stickerGifTool, this.endMessageTool,
       this.timetableTool,
@@ -888,13 +961,20 @@ ${await message()}`,
 
     this.viewMediaTool = new ExtendedDynamicStructuredTool({
       name: "view_media",
-      description: "Download and view an image, sticker, GIF or video from the chat history by its `media_id` (shown like `<WhatsApp Image media_id=...>`). For GIFs, animated stickers and videos you only see the first frame.",
+      description: "Download and view an image, sticker, GIF or video from the chat history by its `media_id` (shown like `<WhatsApp Image media_id=...>`), or an image from `extract_images` (img_1). For GIFs, animated stickers and videos you only see the first frame.",
       schema: z.object({
         media_id: z.string().describe("[Required] The media_id from the chat history."),
       }),
       func: async (args): Promise<ToolImageResult> => {
         const { media_id } = args as any;
+        if (/^img_\d+$/.test(String(media_id).trim())) {
+          const extracted = this.extractedImages.get(media_id);
+          return { text: `${media_id} (${extracted.label}) is attached in the next message.`, image: await toModelImage(extracted.buffer, extracted.mime) };
+        }
         const media = await adapter.getMedia(media_id);
+        if (media.kind == 'document') {
+          throw Error(`${media_id} is a document ("${media.fileName}"), not an image. Use \`read_pdf\` to read a PDF, or \`view_pdf_page\` to see one of its pages.`);
+        }
         const image = await toModelImage(media.buffer, media.mime);
         const label = { image: 'Image', sticker: 'Sticker', gif: 'GIF', video: 'Video' }[media.kind];
         return {
@@ -904,6 +984,38 @@ ${await message()}`,
       }
     }, "{media_id: string}");
 
+    this.readPdfTool = new ExtendedDynamicStructuredTool({
+      name: "read_pdf",
+      description: "Read the text of a PDF sent in the chat (shown like `<WhatsApp Document media_id=... \"file.pdf\" (PDF)>`), page by page. Long PDFs are read a few pages at a time: it says which pages to read next. If a page has no text (e.g. a scanned document or a chart), look at it with `view_pdf_page`.",
+      schema: z.object({
+        source: z.string().describe("[Required] The PDF's media_id from the chat history, or its Google Drive link."),
+        pages: z.string().optional().describe("[Optional] Pages to read, e.g. \"3\", \"2-5\" or \"4-\". Defaults to all pages (as many as fit)."),
+      }),
+      func: async (args) => {
+        const { source, pages } = args as any;
+        const { buffer, name } = await this.loadPdf(source);
+        const { text, pageCount, scanned } = await readPdfText(buffer, pages);
+        const note = scanned ? `\n\n[These pages have little or no text, it's probably scanned or made of images. Use \`view_pdf_page\` to look at them.]` : '';
+        return `${name} (${pageCount} page${pageCount == 1 ? '' : 's'})\n\n${text}${note}`;
+      }
+    }, "{source: string, pages?: string}");
+
+    this.viewPdfPageTool = new ExtendedDynamicStructuredTool({
+      name: "view_pdf_page",
+      description: "See one page of a PDF sent in the chat as an image, e.g. for scanned pages, charts, diagrams, posters or layouts that `read_pdf` can't show.",
+      schema: z.object({
+        source: z.string().describe("[Required] The PDF's media_id from the chat history, or its Google Drive link."),
+        page: z.number().int().min(1).describe("[Required] The page number, starting at 1."),
+      }),
+      func: async (args): Promise<ToolImageResult> => {
+        const { source, page } = args as any;
+        const { buffer, name } = await this.loadPdf(source);
+        parsePages(String(page), await pdfPageCount(buffer));
+        const image = await toModelImage(await pdfPageImage(buffer, page), 'image/png');
+        return { text: `Page ${page} of ${name} is attached in the next message.`, image };
+      }
+    }, "{source: string, page: number}");
+
     this.listGroupsTool = new ExtendedDynamicStructuredTool({
       name: 'list_groups',
       description: 'List all of the group chats that you have access to.',
@@ -912,6 +1024,21 @@ ${await message()}`,
         return JSON.stringify(await adapter.listGroups());
       }
     }, "{}");
+
+    this.getGroupInfoTool = new ExtendedDynamicStructuredTool({
+      name: 'get_group_info',
+      description: "Get a group chat's name, description and participants, with each participant's user ID and description (which says e.g. whether they're a GDGoC member). Use `list_groups` to find group ids.",
+      schema: z.object({
+        group_id: z.string().describe("[Required] The group id, ending with `@g.us`."),
+      }),
+      func: async (args) => {
+        const { group_id } = args as any;
+        if (!String(group_id).endsWith('@g.us')) {
+          throw Error(`"${group_id}" is not a group id, group ids end with @g.us. Get them from \`list_groups\`.`);
+        }
+        return formatGroupInfo(await adapter.getGroupInfo(group_id));
+      }
+    }, "{group_id: string}");
 
     this.readChatHistoryTool = new ExtendedDynamicStructuredTool({
       name: "read_chat_history",
@@ -1014,7 +1141,9 @@ ${await message()}`,
       }
     }, "{poll_id: string}");
 
-    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.sendPollTool, this.readPollTool);
+    this.fileTools = createFileTools({ adapter, workspace: this.workspace, extracted: this.extractedImages });
+    this.tools.push(...this.fileTools);
+    this.tools.push(this.sendMessageTool, this.listGroupsTool, this.getGroupInfoTool, this.readChatHistoryTool, this.sendStickerGifTool, this.viewMediaTool, this.readPdfTool, this.viewPdfPageTool, this.sendPollTool, this.readPollTool);
     this.bindModel();
   }
 
@@ -1503,13 +1632,12 @@ ${await message()}`,
       let ended = false;
       // Sofia gets one nudge per reply when she says she's about to do something but stops without a tool call
       let nudged = false;
-      // Times this reply was stopped for new messages, capped so a busy chat can't keep cutting her off
-      let interrupts = 0;
-
       // Messages to continue with if new ones arrived, checked at points where stopping the response loses nothing:
-      // after thinking, a sent WhatsApp message or a tool call that has run (never halfway through one)
+      // after thinking, a sent WhatsApp message or a tool call that has run (never halfway through one). There's no limit
+      // on how often: long tasks (e.g. building a deck, 15+ minutes) should take every new message into account, and in
+      // groups only messages that pass the reply decision stop her (see `messagesDuringReply`).
       const takeInterrupt = async (instance: AI): Promise<ResponseInputItem[] | null> => {
-        if (ended || interrupts >= MAX_INTERRUPTS || !hasNewMessages?.()) {
+        if (ended || !hasNewMessages?.()) {
           return null;
         }
         try {
@@ -1781,7 +1909,6 @@ ${await message()}`,
         chatHistory.push(...images);
         if (interrupted) {
           controller.abort();
-          interrupts++;
           instance.logger.info(`Stopped the response, continuing with ${interrupted.length} items that arrived during the reply`);
           buffer = "";
           chatHistory.push(...interrupted);
@@ -1883,6 +2010,30 @@ ${await message()}`,
     return `\nWeb Search: You can search the web (\`web_search\`) and read web pages (${read}). Search when someone asks about current events, news, or facts you're not sure of, instead of guessing, and keep searches few and focused: they are slow and costly, so don't search for things you already know or for class info (use \`get_timetable\`, \`assignment_list\` and your other tools for that). Summarise what you found in your own words for WhatsApp (no Markdown), and paste at most one or two source links as plain URLs when they help.`;
   }
 
+  /** A PDF by its WhatsApp media_id, or a Drive link or file id when Workspace is signed in. */
+  async loadPdf(source: string): Promise<{ buffer: Buffer, name: string }> {
+    const google = this.workspace && (/^https?:\/\//.test(source.trim()) || isDriveId(source)) ? await toGoogleLink(source) : null;
+    if (this.workspace && google) {
+      const file = await this.workspace.getFile(google);
+      if (file.mimeType != MIME.pdf) {
+        throw Error(`"${file.name}" isn't a PDF.${file.mimeType?.startsWith('application/vnd.google-apps') ? ' Read it with `google_read_file`.' : ''}`);
+      }
+      return { buffer: await this.workspace.download(file), name: file.name ?? source };
+    }
+    if (!this.chatAdapter) {
+      throw Error('PDFs from the chat are not available here.');
+    }
+    const media = await this.chatAdapter.getMedia(source.trim());
+    const name = media.fileName ?? source;
+    if (media.kind != 'document') {
+      throw Error(`${source} is ${media.kind == 'image' ? 'an image' : `a ${media.kind}`}, not a PDF. Use \`view_media\` to see it.`);
+    }
+    if (media.mime != 'application/pdf' && !/\.pdf$/i.test(name)) {
+      throw Error(`"${name}" isn't a PDF (${media.mime}), only PDFs can be read for now.`);
+    }
+    return { buffer: media.buffer, name };
+  }
+
   /** Extra system prompt text explaining the test environment, empty outside the CLI. */
   testModePrompt(): string {
     if (!this.cli_mode) return '';
@@ -1894,14 +2045,15 @@ ${await message()}`,
       ` Otherwise, behave exactly as you would with real users.`;
   }
 
-  async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string): Promise<string> {
+  /** @param group For group chats, the group's info (description and participants) to include. */
+  async generatePrompt(mode: 'testing' | 'chat' | 'group', current_user_name: string, current_user_id: string, current_user_desc?: string, group?: GroupInfo): Promise<string> {
     // 1. Read the System Prompt from the file
     const systemPromptPath = path.resolve("src/static/prompts/system.md");
     const systemMessageContent = await fs.readFile(systemPromptPath, 'utf-8');
 
     // 2. Get memory for a current user id
     const memories = mode == 'group' ? '' : await this.memoryQueryByUserTool.func({ userId: current_user_id }) as string;
-    const memoryPrompt = `${mode == 'group' ? `Current Group Chat: ${current_user_name} (${current_user_id})` : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
+    const memoryPrompt = `${mode == 'group' ? (group ? `Current ${formatGroupInfo(group)}` : `Current Group Chat: ${current_user_name} (${current_user_id})`) : `You are currently chatting with ${current_user_name} with user ID ${current_user_id}. ${current_user_desc ? "User Description: " + current_user_desc + ". " : ""}Below are your memories related to the current user.
     User Memories: ${JSON.parse(memories).data.filter((m: any) => m.category != 'core').slice(-10).map((m: any) => m.text).join(';')}
     If you have no memory of saying hi to this user for the first time, please use the \`memory_write\` tool call to save this event (leave category empty) and then introduce yourself to the user.`}
     Current Chat Mode: ${mode == 'testing' ? 'Testing Mode (1-to-1) (stickers and GIFs you send are simulated, media_id images are unavailable)' : mode == 'chat' ? "WhatsApp Chat (1-to-1)" : "WhatsApp Group Chat (1-to-many)"}

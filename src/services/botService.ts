@@ -10,7 +10,8 @@ import { BufferSystem } from './bufferSystem';
 import { decideGroupReply, DecisionMsg, ReplyDecision } from './replyDecision';
 import type Store from "./store";
 import type AI from "./ai";
-import type { ChatAdapter, ChatMedia } from "./ai";
+import type { ChatAdapter, ChatMedia, GroupInfo, GroupParticipantInfo, OutgoingFile } from "./ai";
+import { PDF_MAX_BYTES } from "../utils/pdf";
 import { chatContext } from './chatContext';
 import { toUnixSeconds } from '../utils/common';
 import { VIDEO_ENABLED } from '../config/media';
@@ -20,6 +21,8 @@ import { EasyInputMessage, ResponseInput, ResponseInputItem } from "openai/resou
 
 
 const BOTTLE_STORE_NAME = 'sofia';
+/** How long a group's info is reused before it is fetched again (it is also cleared when the group changes). */
+const GROUP_INFO_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Text shown to Sofia for a message. Media get a `media_id` (the WhatsApp message id) she can pass to `view_media`,
@@ -27,6 +30,8 @@ const BOTTLE_STORE_NAME = 'sofia';
  */
 /** The poll in a message, if it is one (WhatsApp has three versions of poll messages). */
 export const pollOf = (m?: proto.IMessage | null) => m?.pollCreationMessage || m?.pollCreationMessageV2 || m?.pollCreationMessageV3;
+/** A document (PDF, Office file...), sent with or without a caption (which WhatsApp wraps in another message). */
+export const documentOf = (m?: proto.IMessage | null) => m?.documentMessage || m?.documentWithCaptionMessage?.message?.documentMessage;
 
 export function describeContent(m: proto.IMessage, id?: string | null, { videos = VIDEO_ENABLED } = {}): string | undefined {
   const poll = pollOf(m);
@@ -48,6 +53,13 @@ export function describeContent(m: proto.IMessage, id?: string | null, { videos 
   }
   if (m.imageMessage) {
     return `<WhatsApp Image${mediaId}>${caption(m.imageMessage.caption)}`;
+  }
+  const document = documentOf(m);
+  if (document) {
+    const name = document.fileName || document.title || 'file';
+    const isPdf = document.mimetype == 'application/pdf' || /\.pdf$/i.test(name);
+    const pages = isPdf && document.pageCount ? `, ${document.pageCount} page${document.pageCount == 1 ? '' : 's'}` : '';
+    return `<WhatsApp Document${mediaId} "${name}" (${isPdf ? 'PDF' : document.mimetype || 'unknown type'}${pages})>${caption(document.caption)}`;
   }
   return m.conversation || m.extendedTextMessage?.text || undefined;
 }
@@ -117,6 +129,8 @@ export class SofiaBot implements ChatAdapter {
   private mediaIndex = new Map<string, string>();
   /** Quoted message id -> the quoted message, for quoted media whose original message isn't in the store. */
   private quotedMediaIndex = new Map<string, WAMessage>();
+  /** Group id -> its info and when it was fetched, see `getGroupInfo`. Cleared when the group or its members change. */
+  private groupInfoCache = new Map<string, { at: number, info: GroupInfo }>();
   /** Chat id -> the newest message Sofia has seen (replied to, chose not to reply to, or saw mid-reply). In memory only. */
   private lastSeen: { [chatId: string]: { id?: string, time: number } | undefined } = {};
   private saveAuthState?: () => Promise<any>;
@@ -205,6 +219,14 @@ export class SofiaBot implements ChatAdapter {
     }
     this.sock.ev.process(
       async (events) => {
+        // A group's name, description or members changed, fetch its info again next time
+        for (const update of events['groups.update'] ?? []) {
+          if (update.id) this.groupInfoCache.delete(update.id);
+        }
+        if (events['group-participants.update']) {
+          this.groupInfoCache.delete(events['group-participants.update'].id);
+        }
+
         // connection update handler
         if (events['connection.update']) {
           const update = events['connection.update'];
@@ -223,7 +245,7 @@ export class SofiaBot implements ChatAdapter {
           }
 
           if (connection === 'open') {
-            // The logger writes to log.log, so print to the console too to show up in `docker compose logs -f sofia`.
+            // The logger writes to files in logs/, so print to the console too to show up in `docker compose logs -f sofia`.
             console.log(`[${new Date().toISOString()}] Sofia is connected to WhatsApp and ready (${this.sock?.user?.id}).`);
             this.logger.info(`Connected to WhatsApp as ${this.sock?.user?.id}`);
           }
@@ -255,7 +277,7 @@ export class SofiaBot implements ChatAdapter {
 
           if (upsert.type === 'notify') {
             for (const msg of upsert.messages) {
-              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage || pollOf(msg.message));
+              const isMedia = !!(msg.message?.imageMessage || msg.message?.stickerMessage || msg.message?.videoMessage || documentOf(msg.message) || pollOf(msg.message));
               if (!msg.key.fromMe && !isJidNewsletter(msg.key?.remoteJid!)) {
                 // Received stickers and GIFs are saved as pending until approved in the web UI
                 this.saveReceivedStickerGif(msg).catch(e => this.logger.error(e, 'Failed to save received sticker/GIF'));
@@ -317,7 +339,11 @@ export class SofiaBot implements ChatAdapter {
                             let systemPrompt;
                             if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@g.us')) {
                               let grpName = (await this.store?.contacts.id(msg.key.remoteJid))?.name || "Unknown Group Chat";
-                              systemPrompt = await this.ai.generatePrompt('group', grpName, msg.key.remoteJid);
+                              const group = await this.getGroupInfo(msg.key.remoteJid).catch(e => {
+                                this.logger.error(e, `Failed to get group info for ${msg.key.remoteJid}`);
+                                return undefined;
+                              });
+                              systemPrompt = await this.ai.generatePrompt('group', group?.name ?? grpName, msg.key.remoteJid, undefined, group);
                             }
                             else if (msg.key.remoteJidAlt) {
                               const current_user = await this.db.user.getUserByJid(msg.key.remoteJidAlt)
@@ -644,7 +670,7 @@ export class SofiaBot implements ChatAdapter {
     };
     const getText = (m: WAMessage) => m.message ? describeContent(m.message, m.key.id) : undefined;
     const getQuotedText = (q: proto.IMessage, id?: string | null) => this.shortenQuotedText(describeContent(q, id));
-    const getContextInfo = (m: WAMessage) => m.message?.extendedTextMessage?.contextInfo || m.message?.imageMessage?.contextInfo || m.message?.videoMessage?.contextInfo || m.message?.stickerMessage?.contextInfo;
+    const getContextInfo = (m: WAMessage) => m.message?.extendedTextMessage?.contextInfo || m.message?.imageMessage?.contextInfo || m.message?.videoMessage?.contextInfo || m.message?.stickerMessage?.contextInfo || documentOf(m.message)?.contextInfo;
     const toChatMsg = async (m: WAMessage, user: string | null): Promise<PreProccessChatMsg> => {
       const contextInfo = getContextInfo(m);
       if (contextInfo?.quotedMessage && contextInfo.stanzaId) {
@@ -754,6 +780,17 @@ export class SofiaBot implements ChatAdapter {
     return user.whatsapp_jid;
   }
 
+  public async sendFile(id: string, file: OutgoingFile): Promise<void> {
+    if (!this.sock) {
+      throw Error("Bot is not connected.");
+    }
+    // GIFs and WebP would need converting to show as photos, so they go as documents
+    const asPhoto = file.mime == 'image/png' || file.mime == 'image/jpeg';
+    await this.sock.sendMessage(await this.resolveJid(id), asPhoto
+      ? { image: file.buffer, mimetype: file.mime, ...(file.caption ? { caption: file.caption } : {}) }
+      : { document: file.buffer, mimetype: file.mime, fileName: file.fileName, ...(file.caption ? { caption: file.caption } : {}) });
+  }
+
   public async sendStickerGif(id: string, sticker: Sticker): Promise<void> {
     if (!this.sock) {
       throw Error("Bot is not connected.");
@@ -787,8 +824,17 @@ export class SofiaBot implements ChatAdapter {
       msg = this.quotedMediaIndex.get(mediaId);
     }
     const content = msg?.message;
-    if (!msg || !content || !(content.imageMessage || content.stickerMessage || content.videoMessage)) {
-      throw Error(`No image, sticker, GIF or video with media_id "${mediaId}" found.`);
+    const document = documentOf(content);
+    if (!msg || !content || !(content.imageMessage || content.stickerMessage || content.videoMessage || document)) {
+      throw Error(`No image, sticker, GIF, video or document with media_id "${mediaId}" found.`);
+    }
+    if (document) {
+      // Checked before downloading, which is the expensive part
+      if (Number(document.fileLength ?? 0) >= PDF_MAX_BYTES) {
+        throw Error(`The document is too big to read (${Math.round(Number(document.fileLength) / 1024 / 1024)} MB, the limit is ${PDF_MAX_BYTES / 1024 / 1024} MB).`);
+      }
+      const fileName = document.fileName || document.title || 'file';
+      return { buffer: await this.downloadMedia(msg), mime: document.mimetype || 'application/octet-stream', kind: 'document', fileName };
     }
     if (content.videoMessage && !content.videoMessage.gifPlayback && !VIDEO_ENABLED) {
       // Checked before downloading, which is the expensive part
@@ -850,6 +896,37 @@ export class SofiaBot implements ChatAdapter {
       broadcast: false,
     };
     await this.sock.sendMessage(jid, { text }, label ? { quoted: replyMsg } : {});
+  }
+
+  /**
+   * A group's name, description and participants, each matched to a user by phone number (resolved from the LID if
+   * needed). People who aren't users are shown as `Unknown (<last 4 digits>)`, never with their full number. Cached for
+   * `GROUP_INFO_TTL_MS`, and cleared when WhatsApp says the group or its members changed.
+   */
+  public async getGroupInfo(groupId: string): Promise<GroupInfo> {
+    const cached = this.groupInfoCache.get(groupId);
+    if (cached && Date.now() - cached.at < GROUP_INFO_TTL_MS) {
+      return cached.info;
+    }
+    if (!this.sock) {
+      throw Error("Bot is not connected.");
+    }
+    const metadata = await this.sock.groupMetadata(groupId);
+    const participants = await Promise.all(metadata.participants.map(async (p): Promise<GroupParticipantInfo> => {
+      const admin = !!p.admin || !!p.isAdmin || !!p.isSuperAdmin;
+      if (this.isOwnJid(p.id) || this.isOwnJid(p.phoneNumber) || this.isOwnJid(p.lid)) {
+        return { name: 'You (Sofia)', userId: null, description: null, admin };
+      }
+      const pn = p.phoneNumber || (p.id.endsWith('@s.whatsapp.net') ? p.id : await this.sock?.signalRepository.lidMapping.getPNForLID(p.id).catch(() => null));
+      const user = pn ? await this.db.user.getUserByJid(this.parseJid(pn)!) : null;
+      if (user) {
+        return { name: user.name, userId: user.id, description: user.description ?? null, admin };
+      }
+      return { name: `Unknown (${(pn ?? p.id).split('@')[0].split(':')[0].slice(-4)})`, userId: null, description: null, admin };
+    }));
+    const info: GroupInfo = { id: groupId, name: metadata.subject, description: metadata.desc ?? '', participants };
+    this.groupInfoCache.set(groupId, { at: Date.now(), info });
+    return info;
   }
 
   public async listGroups(): Promise<{ id: string, name: string }[]> {

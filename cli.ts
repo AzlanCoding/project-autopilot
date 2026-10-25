@@ -13,7 +13,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import readline from 'readline';
 import pino from 'pino';
-import AI, { ChatAdapter, ChatMedia, describeBuiltinToolCall } from './src/services/ai';
+import AI, { ChatAdapter, ChatMedia, GroupInfo, OutgoingFile, describeBuiltinToolCall } from './src/services/ai';
 import type { Sticker } from './src/models/Sticker';
 import { chatContext } from './src/services/chatContext';
 import Store from './src/services/store';
@@ -68,6 +68,13 @@ class MockChatAdapter implements ChatAdapter {
     return pollId;
   }
 
+  async sendFile(id: string, file: OutgoingFile) {
+    const name = id.endsWith('@g.us') ? this.groups.find(g => g.id == id)?.name : (await this.db.user.findById(id))?.name ?? id;
+    const kind = file.mime.startsWith('image/') ? 'Image' : 'Document';
+    console.log(`\n📎 [${kind} -> ${name} (${id})] ${file.fileName} (${file.mime}, ${Math.round(file.buffer.length / 1024)} KB)${file.caption ? ` ${file.caption}` : ''}\n`);
+    await this.record(id, 'AI', `<WhatsApp ${kind}${kind == 'Document' ? ` "${file.fileName}"` : ''}>${file.caption ? ` ${file.caption}` : ''}`);
+  }
+
   async getPollResults(): Promise<null> {
     return null; // Nobody votes in the CLI test harness
   }
@@ -78,6 +85,17 @@ class MockChatAdapter implements ChatAdapter {
 
   async listGroups() {
     return this.groups;
+  }
+
+  /** Every user is in every mock group. */
+  async getGroupInfo(groupId: string): Promise<GroupInfo> {
+    const group = this.groups.find(g => g.id == groupId);
+    if (!group) throw Error(`Unknown group with id ${groupId}`);
+    const users = await this.db.user.findAll();
+    return {
+      id: group.id, name: group.name, description: '(mock group)',
+      participants: [{ name: 'You (Sofia)', userId: null, description: null, admin: true }, ...users.map(u => ({ name: u.name, userId: u.id, description: u.description ?? null, admin: false }))],
+    };
   }
 
   async loadChatById(id: string) {

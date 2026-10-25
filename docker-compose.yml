@@ -19,3 +19,5 @@ services:
       # Mounted instead of env_file so dotenv parses the quoted values
       - ./.env:/app/.env:ro
       - ./assets:/app/assets
+      # Log files, kept on the host so they survive restarts and rebuilds (see LOG_DIR)
+      - ./logs:/app/logs
