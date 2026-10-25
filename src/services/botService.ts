@@ -397,7 +397,9 @@ export class SofiaBot implements ChatAdapter {
                                   newMsg = await this.sock!.sendMessage(msg.key.remoteJid!, { text: yieldState.content as string })
                                 }
                                 lastMsgId = newMsg?.key.id as string | undefined;
-                                await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!);
+                                // A failed typing update mustn't end the reply after the message already went out
+                                await this.sock!.sendPresenceUpdate('composing', msg.key.remoteJid!)
+                                  .catch(e => this.logger.warn(e, `Failed to send composing presence to ${msg.key.remoteJid}`));
                               } else if (yieldState.type === 'done') {
                                 break; // Exit the loop after the full content is collected
                               } else if (yieldState.type === 'tool_call' || yieldState.type == 'tool_call_output' || yieldState.type == 'builtin_tool_call' || yieldState.type == 'reasoning') {

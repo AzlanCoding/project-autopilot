@@ -114,7 +114,7 @@ function workspace(files: { [id: string]: any }, overrides: any = {}) {
   };
   const ws = new GoogleWorkspace(undefined, clients);
   const tools = Object.fromEntries(createWorkspaceWriteTools(ws, {
-    getChatMedia: async () => ({ buffer: Buffer.from('png'), mime: 'image/png', kind: 'image' }),
+    getChatMedia: overrides.getChatMedia ?? (async () => ({ buffer: Buffer.from('png'), mime: 'image/png', kind: 'image' })),
     getImage: (id: string) => { if (id != 'img_1') throw Error(`${id} isn't available any more`); return { buffer: Buffer.from('generated'), mime: 'image/png' }; },
   }).map(t => [t.name, t]));
   return { tools, calls };
@@ -160,6 +160,22 @@ test('trash never deletes, convert copies to a native file next to the original,
   assert.match(last(calls)!, /^files\.copy .*"name":"Proposal","mimeType":"application\/vnd\.google-apps\.document","parents":\["folder1"\]/);
 
   await assert.rejects(tools.docs_edit.invoke({ url: docx.id, action: 'replace_text', find: 'a', replace: 'b' }), /can't be edited directly\. Convert it with drive_manage/);
+});
+
+test('upload saves a generated image or a file from the chat into Drive as its own file, named with its extension', async () => {
+  const folder = { id: LONG('folder'), name: 'Event photos', mimeType: MIME.folder };
+  let { tools, calls } = workspace({ [folder.id]: folder });
+  assert.match(await tools.drive_manage.invoke({ action: 'upload', source: 'img_1', name: 'rin', folder: folder.id }) as string, /^Uploaded/);
+  assert.ok(last(calls)!.startsWith('files.create '));
+  assert.ok(last(calls)!.includes(`"requestBody":{"name":"rin.png","parents":["${folder.id}"]},"media":{"mimeType":"image/png","body":"<body>"}`));
+  // Nothing is deleted afterwards, unlike the temporary uploads for insert_image
+  assert.equal(calls.some(c => c.startsWith('files.delete')), false);
+
+  ({ tools, calls } = workspace({}, { getChatMedia: async () => ({ buffer: Buffer.from('pdf'), mime: 'application/pdf', kind: 'document', fileName: 'Proposal.pdf' }) }));
+  await tools.drive_manage.invoke({ action: 'upload', source: 'ABC123' });
+  assert.match(last(calls)!, /"name":"Proposal\.pdf"/);
+  await assert.rejects(tools.drive_manage.invoke({ action: 'upload', source: 'img_9' }), /isn't available any more/);
+  await assert.rejects(tools.drive_manage.invoke({ action: 'upload' }), /upload needs a source/);
 });
 
 test('a private image is shared by link only while it is inserted, and unshared even if inserting fails', async () => {

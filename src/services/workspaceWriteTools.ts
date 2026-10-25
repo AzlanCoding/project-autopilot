@@ -23,6 +23,13 @@ const cellsSchema = z.array(z.object({
 })).optional();
 const grid2d = z.array(z.array(z.string()));
 
+const EXTENSIONS: { [mime: string]: string } = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'video/mp4': 'mp4', 'application/pdf': 'pdf' };
+/** `name` with the extension for `mime` added if it has none, so Drive shows "rin.png" rather than "rin". */
+const withExtension = (name: string, mime: string) => {
+  const clean = name.replace(/[\\/:*?"<>|\n]+/g, ' ').trim().slice(0, 200) || 'file';
+  const ext = EXTENSIONS[mime.split(';')[0].trim()];
+  return ext && !/\.[a-z0-9]{2,5}$/i.test(clean) ? `${clean}.${ext}` : clean;
+};
 const newId = (prefix: string) => `${prefix}_${randomBytes(6).toString('hex')}`;
 const summary = (replies: any) => {
   const text = JSON.stringify(replies ?? []);
@@ -134,21 +141,44 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
     }
   };
 
+  /**
+   * The file `drive_manage` upload saves: an img_N, a public link, or a WhatsApp media_id. Images Sofia generated or
+   * edited only lived in the img_N cache, so before this she could only put them into a deck or Doc, not into a folder.
+   */
+  const uploadSource = async (source: string): Promise<{ buffer: Buffer, mime: string, fileName: string }> => {
+    const s = source.trim();
+    if (/^img_\d+$/.test(s)) {
+      if (!options.getImage) throw Error(`${s} isn't available here.`);
+      const image = options.getImage(s);
+      return { ...image, fileName: s };
+    }
+    if (/^https?:\/\//.test(s)) {
+      if (await toGoogleLink(s)) throw Error(`${s} is already in Drive: use drive_manage "copy" or "move" instead.`);
+      const { buffer, contentType, url } = await fetchPublic(s, { maxBytes: 50 * 1024 * 1024 });
+      const fileName = decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || new URL(url).hostname;
+      return { buffer, mime: contentType || 'application/octet-stream', fileName };
+    }
+    if (!options.getChatMedia) throw Error(`"${s}" isn't an img_N id or a link, and files from the chat aren't available here.`);
+    const media = await options.getChatMedia(s);
+    return { buffer: media.buffer, mime: media.mime, fileName: media.fileName ?? s };
+  };
+
   // ---------- Drive ----------
 
   const driveManage = new ExtendedDynamicStructuredTool({
     name: 'drive_manage',
-    description: 'Create, copy, move, rename, trash or convert files in Google Drive. New files go in the GDG shared drive unless a folder is given. "trash" moves a file to the trash (it can be restored for 30 days): confirm with the person first. "convert" makes a Google Doc/Sheet/Slides copy of a .docx/.xlsx/.pptx file (next to it, or in folder with name), so it can be edited; it copies and converts in one step, so don\'t copy the Office file first. The original stays as it is.',
+    description: 'Create, copy, move, rename, trash or convert files in Google Drive. New files go in the GDG shared drive unless a folder is given. "trash" moves a file to the trash (it can be restored for 30 days): confirm with the person first. "convert" makes a Google Doc/Sheet/Slides copy of a .docx/.xlsx/.pptx file (next to it, or in folder with name), so it can be edited; it copies and converts in one step, so don\'t copy the Office file first. The original stays as it is. "upload" saves an image or file into Drive as its own file: an img_N (generated, edited, icons, extracted), a WhatsApp media_id or a public link.',
     schema: z.object({
-      action: z.enum(['create', 'copy', 'move', 'rename', 'trash', 'convert']).describe('[Required]'),
+      action: z.enum(['create', 'copy', 'move', 'rename', 'trash', 'convert', 'upload']).describe('[Required]'),
       url: z.string().optional().describe('[copy, move, rename, trash, convert] The file\'s link or id.'),
       type: z.enum(['doc', 'sheet', 'slides', 'folder']).optional().describe('[create] What to create.'),
-      name: z.string().optional().describe('[create, rename; optional for copy and convert] The name.'),
-      folder: z.string().optional().describe('[Optional for create, copy, convert; required for move] The folder\'s link or id.'),
+      name: z.string().optional().describe('[create, rename; optional for copy, convert and upload] The name.'),
+      folder: z.string().optional().describe('[Optional for create, copy, convert, upload; required for move] The folder\'s link or id.'),
       content: z.string().optional().describe('[Optional for create] A Doc\'s content as Markdown, or a Sheet\'s first tab as CSV.'),
+      source: z.string().optional().describe('[upload] The img_N id, WhatsApp media_id or public link to save.'),
     }),
     func: async (args) => {
-      const { action, url, type, name, folder, content } = args as any;
+      const { action, url, type, name, folder, content, source } = args as any;
       const folderId = folder ? (await ws.getFile(folder)).id! : undefined;
       const done = (f: drive_v3.Schema$File, verb: string) => `${verb} "${f.name}" (${fileKind(f.mimeType)}): ${f.webViewLink ?? googleFileLink(f.id!, f.mimeType)}`;
       const fields = 'id,name,mimeType,webViewLink,parents';
@@ -161,6 +191,16 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
         const f = await ws.call(() => api().drive.files.create({ requestBody: { name, mimeType, parents: [parent] }, media, fields, supportsAllDrives: true }));
         // New decks come with one empty title slide, which is easy to miss when adding slides after it
         return done(f, 'Created') + (type == 'slides' ? '\nIt starts with one empty title slide (slide 1): fill it in or delete it.' : '');
+      }
+      if (action == 'upload') {
+        if (!source) throw Error('upload needs a source: an img_N id, a WhatsApp media_id or a public link.');
+        const upload = await uploadSource(source);
+        const fileName = withExtension(name?.trim() || upload.fileName, upload.mime);
+        const f = await ws.call(() => api().drive.files.create({
+          requestBody: { name: fileName, parents: [folderId ?? GDG_SHARED_DRIVE_ID ?? 'root'] },
+          media: { mimeType: upload.mime, body: Readable.from(upload.buffer) }, fields, supportsAllDrives: true,
+        }));
+        return done(f, 'Uploaded');
       }
       if (!url) throw Error(`${action} needs the file's link.`);
       const file = await ws.getFile(url);
@@ -195,7 +235,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       }
       throw Error(`Unknown action ${action}.`);
     }
-  }, '{action: "create" | "copy" | "move" | "rename" | "trash" | "convert", url?: string, type?: "doc" | "sheet" | "slides" | "folder", name?: string, folder?: string, content?: string}');
+  }, '{action: "create" | "copy" | "move" | "rename" | "trash" | "convert" | "upload", url?: string, type?: "doc" | "sheet" | "slides" | "folder", name?: string, folder?: string, content?: string, source?: string}');
 
   const share = new ExtendedDynamicStructuredTool({
     name: 'drive_share',
