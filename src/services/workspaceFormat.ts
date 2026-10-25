@@ -19,18 +19,20 @@ const quote = (text: string) => JSON.stringify(text);
 type StructuralElement = docs_v1.Schema$StructuralElement;
 
 /** A Doc's tabs in order (child tabs after their parent), each with its body. Docs without tabs have one. */
-export function docTabs(doc: docs_v1.Schema$Document): { id: string, title: string, level: number, body: StructuralElement[], inlineObjects: docs_v1.Schema$DocumentTab['inlineObjects'] }[] {
+export function docTabs(doc: docs_v1.Schema$Document): { id: string, title: string, level: number, parent?: string, body: StructuralElement[], inlineObjects: docs_v1.Schema$DocumentTab['inlineObjects'] }[] {
   const tabs: ReturnType<typeof docTabs> = [];
-  const walk = (list: docs_v1.Schema$Tab[] | undefined, level: number) => {
+  const walk = (list: docs_v1.Schema$Tab[] | undefined, level: number, parent?: string) => {
     for (const tab of list ?? []) {
+      const title = tab.tabProperties?.title ?? 'Tab';
       tabs.push({
         id: tab.tabProperties?.tabId ?? '',
-        title: tab.tabProperties?.title ?? 'Tab',
+        title,
         level,
+        ...(parent != null ? { parent } : {}),
         body: tab.documentTab?.body?.content ?? [],
         inlineObjects: tab.documentTab?.inlineObjects,
       });
-      walk(tab.childTabs ?? undefined, level + 1);
+      walk(tab.childTabs ?? undefined, level + 1, title);
     }
   };
   walk(doc.tabs ?? undefined, 0);
@@ -38,6 +40,11 @@ export function docTabs(doc: docs_v1.Schema$Document): { id: string, title: stri
     tabs.push({ id: '', title: doc.title ?? 'Document', level: 0, body: doc.body?.content ?? [], inlineObjects: doc.inlineObjects });
   }
   return tabs;
+}
+
+/** A tab as Sofia sees it in lists and headings: `"Week 1" (id t.abc, inside "Minutes")`. */
+export function docTabLabel(tab: { id: string, title: string, parent?: string }): string {
+  return `"${tab.title}" (id ${tab.id}${tab.parent != null ? `, inside "${tab.parent}"` : ''})`;
 }
 
 /** A paragraph's text, with links as Markdown links, images as `[image]` and smart chips (people, dates, files) shown. */

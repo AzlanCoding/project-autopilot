@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseGoogleUrl, googleFileLink } from '../src/utils/googleUrls';
-import { columnLetter, docStructure, docTabs, docToMarkdown, formatComments, parseA1Cell, sheetGrid, sheetTabs, slidesText, findSlide } from '../src/services/workspaceFormat';
+import { columnLetter, docStructure, docTabLabel, docTabs, docToMarkdown, formatComments, parseA1Cell, sheetGrid, sheetTabs, slidesText, findSlide } from '../src/services/workspaceFormat';
 import { isPrivateAddress, fetchPublic } from '../src/utils/safeFetch';
 import { imageResultsFromOutput } from '../src/services/imageSearch';
 import { GoogleWorkspace, MIME } from '../src/services/googleWorkspace';
@@ -67,6 +67,8 @@ function cell(start: number, text: string) {
 test('Docs read as Markdown and as a structure with indices, tabs included', () => {
   const tabs = docTabs(proposalDoc as any);
   assert.deepEqual(tabs.map(t => [t.id, t.title, t.level]), [['t.0', 'Proposal', 0], ['t.1', 'Notes', 1]]);
+  // Tabs inside other tabs say so, otherwise a list of tabs looks flat
+  assert.equal(docTabLabel(tabs[1]), '"Notes" (id t.1, inside "Proposal")');
   assert.equal(docToMarkdown(tabs[0].body), [
     '# DevFest Proposal', '', '- Venue: NYP L', 'See [the guide](https://example.com/guide)', '',
     '| Item | Cost | Notes |', '| --- | --- | --- |', '| Snacks | 120 |  |', '', '[image]',

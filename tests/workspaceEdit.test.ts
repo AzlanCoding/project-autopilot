@@ -7,6 +7,7 @@ import {
 } from '../src/services/workspaceEdit';
 import { GoogleWorkspace, MIME } from '../src/services/googleWorkspace';
 import { createWorkspaceWriteTools } from '../src/services/workspaceWriteTools';
+import { planSlideCopy, slideMoveIndex } from '../src/services/slideCopy';
 
 test('inline Markdown becomes plain text with bold, italic and link spans', () => {
   assert.deepEqual(parseInlineMarkdown('Total **$500** for *snacks* (see [the sheet](https://example.com/s)) and_not_italic'), {
@@ -106,7 +107,7 @@ function workspace(files: { [id: string]: any }, overrides: any = {}) {
     sheets: overrides.sheets,
     docs: {
       documents: {
-        get: async () => ({ data: { tabs: [{ tabProperties: { tabId: 't.0', title: 'Tab 1' }, documentTab: { body: { content: [{ startIndex: 0, endIndex: 1, sectionBreak: {} }, { startIndex: 1, endIndex: 7, paragraph: { elements: [{ textRun: { content: 'Hello\n' } }] } }] } } }] } }),
+        get: overrides.docsGet ?? (async () => ({ data: { tabs: [{ tabProperties: { tabId: 't.0', title: 'Tab 1' }, documentTab: { body: { content: [{ startIndex: 0, endIndex: 1, sectionBreak: {} }, { startIndex: 1, endIndex: 7, paragraph: { elements: [{ textRun: { content: 'Hello\n' } }] } }] } } }] } })),
         batchUpdate: overrides.docsBatchUpdate ?? record('docs.batchUpdate', { replies: [] }),
       },
     },
@@ -307,4 +308,228 @@ test('batch requests with unquoted property names or trailing commas are repaire
   assert.deepEqual(parseRequests('[{insertText: {objectId: "lbl01", text: "01, LOAD: pull, then {x: 1},"},}]'), [{ insertText: { objectId: 'lbl01', text: '01, LOAD: pull, then {x: 1},' } }]);
   assert.deepEqual(parseRequests('[{"insertText": {"objectId": "lbl01", "text": "01, LOAD: pull the text out"}}]'), [{ insertText: { objectId: 'lbl01', text: '01, LOAD: pull the text out' } }]);
   assert.throws(() => parseRequests("[{'insertText': {}}]"), /Use double quotes around every property name and string/);
+});
+
+test('Doc tabs are added (inside another tab, with content), renamed and deleted, never the first tab by default', async () => {
+  const doc = { id: LONG('doc'), name: 'Proposal', mimeType: MIME.doc, webViewLink: 'https://docs.google.com/document/d/doc/edit?usp=drivesdk' };
+  const empty = { content: [{ startIndex: 0, endIndex: 1, sectionBreak: {} }, { startIndex: 1, endIndex: 2, paragraph: { elements: [{ textRun: { content: '\n' } }] } }] };
+  const tabs = [
+    { tabProperties: { tabId: 't.0', title: 'Proposal' }, documentTab: { body: empty } },
+    { tabProperties: { tabId: 't.1', title: 'Minutes' }, documentTab: { body: empty }, childTabs: [{ tabProperties: { tabId: 't.2', title: 'Week 1' }, documentTab: { body: empty } }] },
+    { tabProperties: { tabId: 't.3', title: 'Budget' }, documentTab: { body: empty } },
+  ];
+  const batches: any[][] = [];
+  const { tools } = workspace({ [doc.id]: doc }, {
+    docsGet: async () => ({ data: { tabs } }),
+    docsBatchUpdate: async ({ requestBody }: any) => { batches.push(requestBody.requests); return { data: { replies: [{ addDocumentTab: { tabProperties: { tabId: 't.new' } } }] } }; },
+  });
+  assert.match(await tools.docs_edit.invoke({ url: doc.id, action: 'add_tab', new_name: 'Week 2', parent_tab: 'minutes', position: 2, markdown: '# Week 2' }) as string, /Added tab "Week 2" \(id t\.new\) inside "Minutes".*\?tab=t\.new/);
+  assert.deepEqual(batches[0], [{ addDocumentTab: { tabProperties: { title: 'Week 2', parentTabId: 't.1', index: 1 } } }]);
+  // The content goes in the new tab, at its start
+  assert.deepEqual(batches[1][0], { insertText: { location: { index: 1, tabId: 't.new' }, text: 'Week 2\n' } });
+
+  // Sofia named the new tab with tab, as sheets_edit add_tab does, and was told "There's no tab" (2026-10-25)
+  await tools.docs_edit.invoke({ url: doc.id, action: 'add_tab', tab: 'Post-event notes' });
+  assert.deepEqual(last(batches), [{ addDocumentTab: { tabProperties: { title: 'Post-event notes' } } }]);
+
+  await tools.docs_edit.invoke({ url: doc.id, action: 'rename_tab', tab: 'Budget', new_name: 'Costs' });
+  assert.deepEqual(last(batches), [{ updateDocumentTabProperties: { tabProperties: { tabId: 't.3', title: 'Costs' }, fields: 'title' } }]);
+
+  await assert.rejects(tools.docs_edit.invoke({ url: doc.id, action: 'delete_tab' }), /Say which tab to delete with tab\. Tabs: "Proposal" \(id t\.0\), "Minutes" \(id t\.1\), "Week 1" \(id t\.2, inside "Minutes"\)/);
+  assert.match(await tools.docs_edit.invoke({ url: doc.id, action: 'delete_tab', tab: 'Minutes' }) as string, /Deleted tab "Minutes" and the tabs inside it \("Week 1"\)/);
+  assert.deepEqual(last(batches), [{ deleteTab: { tabId: 't.1' } }]);
+
+  // Markdown in an empty tab replaces its empty paragraph instead of going after it
+  await tools.docs_edit.invoke({ url: `https://docs.google.com/document/d/${doc.id}/edit?tab=t.3`, action: 'insert_markdown', markdown: 'Total: $120' });
+  assert.deepEqual(last(batches)[0], { insertText: { location: { index: 1, tabId: 't.3' }, text: 'Total: $120\n' } });
+});
+
+test('a Sheet tab is duplicated next to itself, or copied into another Sheet keeping its name when that is free', async () => {
+  const a = { id: LONG('sheetA'), name: 'Budget', mimeType: MIME.sheet, webViewLink: 'https://docs.google.com/spreadsheets/d/a/edit?usp=drivesdk' };
+  const b = { id: LONG('sheetB'), name: 'Budget 2027', mimeType: MIME.sheet, webViewLink: 'https://docs.google.com/spreadsheets/d/b/edit?usp=drivesdk' };
+  const tabsOf: any = {
+    [a.id]: [{ properties: { sheetId: 0, title: 'Data', index: 0 } }, { properties: { sheetId: 7, title: 'Summary', index: 1 } }],
+    [b.id]: [{ properties: { sheetId: 0, title: 'Summary', index: 0 } }, { properties: { sheetId: 99, title: 'Copy of Data', index: 1 } }],
+  };
+  const batches: any[] = [];
+  const copies: any[] = [];
+  const { tools } = workspace({ [a.id]: a, [b.id]: b }, {
+    sheets: {
+      spreadsheets: {
+        get: async ({ spreadsheetId }: any) => ({ data: { sheets: tabsOf[spreadsheetId] } }),
+        batchUpdate: async (params: any) => { batches.push(params); return { data: { replies: [{ duplicateSheet: { properties: { sheetId: 42, title: 'Copy of Data' } } }] } }; },
+        sheets: { copyTo: async (params: any) => { copies.push(params); return { data: { sheetId: 99, title: params.sheetId == 7 ? 'Copy of Summary' : 'Copy of Data' } }; } },
+        values: { get: async () => ({ data: { values: [['Total', '=SUM(Data!B2:B10)']] } }) },
+      },
+    },
+  });
+  assert.match(await tools.sheets_edit.invoke({ url: a.id, action: 'duplicate_tab', tab: 'Data' }) as string, /Duplicated tab "Data" as "Copy of Data" \(id 42\)\. https:\/\/docs\.google\.com\/spreadsheets\/d\/a\/edit#gid=42/);
+  assert.deepEqual(batches[0].requestBody.requests, [{ duplicateSheet: { sourceSheetId: 0, insertSheetIndex: 1 } }]);
+
+  // "Data" is free in the other Sheet, so the copy is renamed back from "Copy of Data" and moved first
+  assert.match(await tools.sheets_edit.invoke({ url: a.id, action: 'duplicate_tab', tab: 'Data', to_url: b.id, position: 1 }) as string, /Copied tab "Data" into "Budget 2027" as "Data"/);
+  assert.deepEqual(copies[0], { spreadsheetId: a.id, sheetId: 0, requestBody: { destinationSpreadsheetId: b.id } });
+  assert.deepEqual(last(batches), { spreadsheetId: b.id, requestBody: { requests: [{ updateSheetProperties: { properties: { sheetId: 99, title: 'Data', index: 0 }, fields: 'title,index' } }] } });
+
+  // "Summary" is taken there: it stays "Copy of Summary", and formulas pointing at other tabs are flagged
+  batches.length = 0;
+  const result = await tools.sheets_edit.invoke({ url: a.id, action: 'duplicate_tab', tab: 'Summary', to_url: b.id }) as string;
+  assert.match(result, /as "Copy of Summary".*formulas refer to other tabs.*#REF!/);
+  assert.equal(batches.length, 0);
+});
+
+test('slides moved or duplicated to a position end up exactly there, though the API counts positions before the move', async () => {
+  // A B C: moving A to 3 needs index 3 (after C), not 2, which left it second
+  assert.equal(slideMoveIndex(['A', 'B', 'C'], ['A'], 3), 3);
+  assert.equal(slideMoveIndex(['A', 'B', 'C'], ['C'], 1), 0);
+  assert.equal(slideMoveIndex(['A', 'B', 'C'], ['B'], 2), 2);
+  // Copies of A and B right after their originals (A A' B B'), moved together to position 3: after B
+  assert.equal(slideMoveIndex(['A', "A'", 'B', "B'"], ["A'", "B'"], 3), 4);
+});
+
+/** A deck with a master and layout whose placeholders give the text its look (font, size, colour per list level). */
+function brandedDeck() {
+  const run = (content: string, style: any) => ({ textRun: { content, style } });
+  return {
+    pageSize: { width: { magnitude: 9144000, unit: 'EMU' }, height: { magnitude: 5143500, unit: 'EMU' } },
+    masters: [{
+      objectId: 'master1', masterProperties: { displayName: 'DevFest 2023' },
+      pageProperties: { pageBackgroundFill: { solidFill: { color: { themeColor: 'LIGHT2' } } }, colorScheme: { colors: [{ type: 'LIGHT2', color: { red: 0.9, green: 0.9, blue: 0.9 } }, { type: 'ACCENT1', color: { red: 0.26, green: 0.52, blue: 0.96 } }] } },
+      pageElements: [
+        { objectId: 'm_logo', size: { width: { magnitude: 100 }, height: { magnitude: 50 } }, transform: { scaleX: 1, scaleY: 1, translateX: 10, translateY: 20, unit: 'EMU' }, image: { contentUrl: 'https://lh3.googleusercontent.com/logo' } },
+        { objectId: 'm_body', shape: { shapeType: 'TEXT_BOX', placeholder: { type: 'BODY' }, text: { textElements: [
+          { startIndex: 0, endIndex: 1, paragraphMarker: { style: { alignment: 'START', spaceBelow: { magnitude: 12, unit: 'PT' } } } }, { startIndex: 0, endIndex: 1, ...run('\n', { fontFamily: 'Roboto Mono', fontSize: { magnitude: 18, unit: 'PT' }, foregroundColor: { opaqueColor: { themeColor: 'ACCENT1' } } }) },
+          { startIndex: 1, endIndex: 2, paragraphMarker: { style: { alignment: 'START' } } }, { startIndex: 1, endIndex: 2, ...run('\n', { fontFamily: 'Roboto Mono', fontSize: { magnitude: 14, unit: 'PT' } }) },
+        ] }, shapeProperties: { shapeBackgroundFill: { propertyState: 'NOT_RENDERED' }, outline: { propertyState: 'NOT_RENDERED' }, contentAlignment: 'TOP' } } },
+      ],
+    }],
+    layouts: [{
+      objectId: 'layout1', layoutProperties: { displayName: 'Title and body', masterObjectId: 'master1' },
+      pageElements: [{ objectId: 'l_body', size: { width: { magnitude: 3000000 }, height: { magnitude: 3000000 } }, transform: { scaleX: 2, scaleY: 1, translateX: 300000, translateY: 1000000, unit: 'EMU' }, shape: { shapeType: 'TEXT_BOX', placeholder: { type: 'BODY', parentObjectId: 'm_body' }, shapeProperties: { shapeBackgroundFill: { propertyState: 'INHERIT' }, outline: { propertyState: 'INHERIT' } } } }],
+    }],
+    slides: [{
+      objectId: 'slide1', slideProperties: {
+        layoutObjectId: 'layout1', masterObjectId: 'master1',
+        notesPage: { notesProperties: { speakerNotesObjectId: 'notes1' }, pageElements: [{ objectId: 'notes1', shape: { text: { textElements: [run('Say hello\n', {})] } } }] },
+      },
+      pageElements: [
+        // Body text: "Point" bold, then a nested list item, with everything else inherited
+        { objectId: 'body1', size: { width: { magnitude: 3000000 }, height: { magnitude: 3000000 } }, transform: { scaleX: 2, scaleY: 1, translateX: 300000, translateY: 1000000, unit: 'EMU' }, shape: {
+          shapeType: 'TEXT_BOX', placeholder: { type: 'BODY', parentObjectId: 'l_body' },
+          shapeProperties: { shapeBackgroundFill: { propertyState: 'INHERIT' }, outline: { propertyState: 'INHERIT' }, autofit: { fontScale: 1 } },
+          text: { textElements: [
+            { startIndex: 0, endIndex: 10, paragraphMarker: { style: {}, bullet: { listId: 'l', glyph: '●' } } }, { startIndex: 0, endIndex: 5, ...run('Point', { bold: true }) }, { startIndex: 5, endIndex: 10, ...run(' one\n', {}) },
+            { startIndex: 10, endIndex: 14, paragraphMarker: { style: {}, bullet: { listId: 'l', nestingLevel: 1, glyph: '○' } } }, { startIndex: 10, endIndex: 14, ...run('Sub\n', {}) },
+          ] },
+        } },
+        // A group of two shapes, moved 100 to the right as a whole
+        { objectId: 'group1', transform: { scaleX: 1, scaleY: 1, translateX: 100, translateY: 0, unit: 'EMU' }, elementGroup: { children: [
+          { objectId: 'dot1', size: { width: { magnitude: 50 }, height: { magnitude: 50 } }, transform: { scaleX: 1, scaleY: 1, translateX: 10, translateY: 10, unit: 'EMU' }, shape: { shapeType: 'ELLIPSE', shapeProperties: { shapeBackgroundFill: { solidFill: { color: { themeColor: 'ACCENT1' } } }, outline: { propertyState: 'NOT_RENDERED' } } } },
+          { objectId: 'dot2', size: { width: { magnitude: 50 }, height: { magnitude: 50 } }, transform: { scaleX: 1, scaleY: 1, translateX: 70, translateY: 10, unit: 'EMU' }, shape: { shapeType: 'ELLIPSE' } },
+        ] } },
+        { objectId: 'chart1', size: { width: { magnitude: 400 }, height: { magnitude: 300 } }, sheetsChart: { spreadsheetId: 'x', chartId: 1, contentUrl: 'https://lh3.googleusercontent.com/chart' } },
+        { objectId: 'art1', wordArt: { renderedText: 'Wow' } },
+      ],
+    }],
+  };
+}
+
+/** A plain deck with a Blank layout (only a slide number) and its own Title and body layout. */
+function plainDeck(masterName = 'Simple Light') {
+  return {
+    pageSize: { width: { magnitude: 9144000, unit: 'EMU' }, height: { magnitude: 5143500, unit: 'EMU' } },
+    masters: [{ objectId: 'pm', masterProperties: { displayName: masterName } }],
+    layouts: [
+      { objectId: 'p_blank', layoutProperties: { name: 'BLANK', displayName: 'Blank', masterObjectId: 'pm' }, pageElements: [{ objectId: 'p_num', shape: { placeholder: { type: 'SLIDE_NUMBER' } } }] },
+      { objectId: 'p_tb', layoutProperties: { name: 'TITLE_AND_BODY', displayName: 'Title and body', masterObjectId: 'pm' }, pageElements: [
+        { objectId: 'p_title', size: { width: { magnitude: 3000000 }, height: { magnitude: 3000000 } }, shape: { placeholder: { type: 'TITLE' } } },
+        { objectId: 'p_body', size: { width: { magnitude: 3000000 }, height: { magnitude: 3000000 } }, shape: { placeholder: { type: 'BODY' } } },
+      ] },
+    ],
+    slides: [{ objectId: 'existing', slideProperties: { layoutObjectId: 'p_blank' } }],
+  };
+}
+
+test("a slide copied to a deck with another template keeps its look: inherited styles, theme colours, background and the template's logo", () => {
+  const source: any = brandedDeck();
+  let n = 0;
+  const plan = planSlideCopy(source, source.slides[0], plainDeck() as any, 1, 'source', p => `${p}_${++n}`);
+  const r = plan.requests;
+  assert.equal(plan.layout, 'Blank');
+  assert.equal(plan.placeholders, false);
+  assert.deepEqual(r[0], { createSlide: { objectId: plan.slideId, insertionIndex: 1, slideLayoutReference: { layoutId: 'p_blank' } } });
+  // The master's background, its theme colour turned into the colour it has in the source deck
+  assert.deepEqual(r[1], { updatePageProperties: { objectId: plan.slideId, pageProperties: { pageBackgroundFill: { solidFill: { color: { rgbColor: { red: 0.9, green: 0.9, blue: 0.9 } } } } }, fields: 'pageBackgroundFill' } });
+  // The master's logo first (behind), its placeholder isn't copied
+  assert.equal(r[2].createImage?.url, 'https://lh3.googleusercontent.com/logo');
+  assert.equal(r.filter(q => q.createShape).length, 3);
+
+  const body = r.find(q => q.createShape?.shapeType == 'TEXT_BOX')!.createShape!.objectId!;
+  const on = (kind: string) => r.filter((q: any) => q[kind]?.objectId == body).map((q: any) => q[kind]);
+  // Nested list items go in with a tab per level, which createParagraphBullets turns into the nesting
+  assert.deepEqual(on('insertText'), [{ objectId: body, insertionIndex: 0, text: 'Point one\n\tSub' }]);
+  assert.deepEqual(on('createParagraphBullets'), [{ objectId: body, textRange: { type: 'FIXED_RANGE', startIndex: 0, endIndex: 14 }, bulletPreset: 'BULLET_DISC_CIRCLE_SQUARE' }]);
+  // Each list level's look comes from the master's paragraph for that level
+  const styles = on('updateTextStyle');
+  assert.deepEqual(styles[0].style, { bold: true, fontSize: { magnitude: 18, unit: 'PT' }, foregroundColor: { opaqueColor: { rgbColor: { red: 0.26, green: 0.52, blue: 0.96 } } }, fontFamily: 'Roboto Mono' });
+  assert.equal(styles[0].fields, 'bold,fontSize,foregroundColor,fontFamily');
+  assert.deepEqual(styles[2].style, { fontSize: { magnitude: 14, unit: 'PT' }, fontFamily: 'Roboto Mono' });
+  assert.deepEqual(on('updateParagraphStyle')[0].style, { alignment: 'START', spaceBelow: { magnitude: 12, unit: 'PT' } });
+  assert.deepEqual(on('updateShapeProperties')[0].shapeProperties, { shapeBackgroundFill: { propertyState: 'NOT_RENDERED' }, outline: { propertyState: 'NOT_RENDERED' }, contentAlignment: 'TOP' });
+
+  // Group children are placed where the group put them, then grouped again
+  const dots = r.filter(q => q.createShape?.shapeType == 'ELLIPSE').map(q => q.createShape!);
+  assert.deepEqual(dots.map(d => d.elementProperties!.transform!.translateX), [110, 170]);
+  assert.deepEqual(r.find(q => q.groupObjects)!.groupObjects!.childrenObjectIds, dots.map(d => d.objectId));
+  // Charts become images, word art can't be made
+  assert.equal(r.filter(q => q.createImage).length, 2);
+  assert.deepEqual(plan.skipped, ['word art']);
+  assert.equal(plan.notes, 'Say hello');
+});
+
+test("a slide copied to a deck with the same template, or with the other deck's design, fills that deck's placeholders", () => {
+  const source: any = brandedDeck();
+  for (const [target, design] of [[plainDeck('DevFest 2023'), 'source'], [plainDeck(), 'destination']] as const) {
+    let n = 0;
+    const plan = planSlideCopy(source, source.slides[0], target as any, 1, design, p => `${p}_${++n}`);
+    assert.equal(plan.layout, 'Title and body');
+    assert.equal(plan.placeholders, true);
+    // Only the body placeholder is used, so only it is mapped (the title is removed later as an empty placeholder)
+    const ph = plan.requests[0].createSlide!.placeholderIdMappings!;
+    assert.deepEqual(ph.map(m => m.layoutPlaceholderObjectId), ['p_body']);
+    assert.equal(plan.requests.some(q => q.updatePageProperties), false);
+    assert.equal(plan.requests.some(q => q.createImage?.url?.endsWith('logo')), false);
+    // It stays where it was, and keeps the slide's own bold, its theme colours and font size, not the old font
+    assert.deepEqual(plan.requests.find(q => q.updatePageElementTransform)!.updatePageElementTransform, { objectId: ph[0].objectId, applyMode: 'ABSOLUTE', transform: { scaleX: 2, scaleY: 1, translateX: 300000, translateY: 1000000, unit: 'EMU', shearX: 0, shearY: 0 } });
+    const style = plan.requests.find(q => q.updateTextStyle?.objectId == ph[0].objectId)!.updateTextStyle!;
+    assert.deepEqual(style.style, { bold: true, fontSize: { magnitude: 18, unit: 'PT' } });
+  }
+});
+
+test('copying slides into another deck adds their speaker notes and removes empty placeholders left by the layout', async () => {
+  const from = { id: LONG('from'), name: 'Old deck', mimeType: MIME.slides, webViewLink: 'https://docs.google.com/presentation/d/from/edit' };
+  const to = { id: LONG('to'), name: 'New deck', mimeType: MIME.slides, webViewLink: 'https://docs.google.com/presentation/d/to/edit' };
+  const target: any = plainDeck('DevFest 2023');
+  const batches: any[] = [];
+  const { tools } = workspace({ [from.id]: from, [to.id]: to }, {
+    slides: { presentations: {
+      get: async ({ presentationId }: any) => ({ data: presentationId == from.id ? brandedDeck() : target }),
+      batchUpdate: async ({ presentationId, requestBody }: any) => {
+        batches.push({ presentationId, requests: requestBody.requests });
+        const created = requestBody.requests[0].createSlide;
+        if (created) {
+          // The new slide, with the layout's title placeholder still empty
+          target.slides = [...target.slides, { objectId: created.objectId, slideProperties: { layoutObjectId: 'p_tb', notesPage: { notesProperties: { speakerNotesObjectId: 'new_notes' } } }, pageElements: [
+            { objectId: 'empty_title', shape: { placeholder: { type: 'TITLE' } } },
+            { objectId: created.placeholderIdMappings[0].objectId, shape: { placeholder: { type: 'BODY' }, text: { textElements: [{ textRun: { content: 'Point one\n' } }] } } },
+          ] }];
+        }
+        return { data: { replies: [] } };
+      },
+    } },
+  });
+  const result = await tools.slides_edit.invoke({ url: from.id, action: 'duplicate_slide', slide: '1', to_url: to.id }) as string;
+  assert.match(result, /Copied the slide into "New deck": slide 1 -> slide 2 \(slide_\w+, its "Title and body" layout\)\. Couldn't copy word art\./);
+  assert.equal(batches.every(b => b.presentationId == to.id), true);
+  assert.deepEqual(batches[1].requests, [{ deleteObject: { objectId: 'empty_title' } }, { insertText: { objectId: 'new_notes', insertionIndex: 0, text: 'Say hello' } }]);
 });

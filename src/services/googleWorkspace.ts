@@ -7,7 +7,7 @@ import { GoogleFileRef, parseGoogleUrl, toGoogleLink } from '../utils/googleUrls
 import { formatDateTime } from '../utils/common';
 import { PDF_MAX_BYTES } from '../utils/pdf';
 import {
-  capText, docStructure, docTabs, docToMarkdown, driveFileLine, fileKind, findSlide, formatComments, gridRangeA1,
+  capText, docStructure, docTabLabel, docTabs, docToMarkdown, driveFileLine, fileKind, findSlide, formatComments, gridRangeA1,
   sheetGrid, sheetTabs, slidesText,
 } from './workspaceFormat';
 
@@ -147,7 +147,7 @@ export class GoogleWorkspace {
     if (!tab) return tabs[0];
     const found = tabs.find(t => t.id == tab || t.title.toLowerCase() == tab.trim().toLowerCase());
     if (!found) {
-      throw Error(`There's no tab "${tab}". Tabs: ${tabs.map(t => `"${t.title}" (${t.id})`).join(', ')}`);
+      throw Error(`There's no tab "${tab}". Tabs: ${tabs.map(docTabLabel).join(', ')}`);
     }
     return found;
   }
@@ -159,14 +159,14 @@ export class GoogleWorkspace {
     if (tabs.length == 1) {
       return docToMarkdown(tabs[0].body);
     }
-    return tabs.map(t => `===== Tab "${t.title}" (id ${t.id}) =====\n\n${docToMarkdown(t.body)}`).join('\n\n');
+    return tabs.map(t => `===== Tab ${docTabLabel(t)} =====\n\n${docToMarkdown(t.body)}`).join('\n\n');
   }
 
   async readDocStructure(id: string, tab?: string): Promise<string> {
     const doc = await this.getDoc(id);
     const tabs = docTabs(doc);
     const picked = this.pickTab(doc, tab);
-    const tabList = tabs.length > 1 ? `Tabs: ${tabs.map(t => `${'  '.repeat(t.level)}"${t.title}" (id ${t.id})`).join(', ')}\nShowing tab "${picked.title}" (id ${picked.id})\n\n` : '';
+    const tabList = tabs.length > 1 ? `Tabs: ${tabs.map(docTabLabel).join(', ')}\nShowing tab ${docTabLabel(picked)}\n\n` : '';
     return tabList + docStructure(picked.body, picked.inlineObjects);
   }
 

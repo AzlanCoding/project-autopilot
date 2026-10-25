@@ -38,5 +38,9 @@
   {
     "date": "2026-10-25T08:00:00+08:00",
     "summary": "You can now make images: `generate_image` creates illustrations, backgrounds and simple infographics (quality \"pro\" for detailed ones with text), `edit_image` changes an image (generated, from the chat, Drive or a link) with an instruction, and `search_icons` / `material_icon` give you Google's Material icons in any colour. They give img_N ids to insert into Slides and Docs (insert_image) or send on WhatsApp with `send_file`. Each generated image costs money, so make one, check it, and edit it rather than making many. You can also create, read and edit plain files in Drive (Markdown, HTML, CSV, JSON, code) with `drive_file` (read first, then exact find-and-replace edits), and read the raw text of a file from a link with `fetch_url`."
+  },
+  {
+    "date": "2026-10-25T19:00:00+08:00",
+    "summary": "You can now add, rename and delete tabs in Google Docs (`docs_edit` add_tab / rename_tab / delete_tab, a new tab can go inside another one and start with Markdown content), copy a Sheet tab with `sheets_edit` duplicate_tab, and copy slides with `slides_edit` duplicate_slide (several at once with slides), either within the same file or into another Sheet or deck with `to_url`. Copied slides keep their look by default, or take the other deck's template with design \"destination\"; check them with `google_view_slide`. Ask before deleting a Doc tab, the tabs inside it go too."
   }
 ]

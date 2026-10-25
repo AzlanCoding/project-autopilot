@@ -74,6 +74,7 @@ src/services/
   googleWorkspace.ts       Sofia's Google Workspace client (OAuth token from `pnpm google-auth`), Drive/Docs/Sheets/Slides reads
   workspaceFormat.ts       API JSON -> text for Sofia: Docs Markdown/structure, Sheets grids, Slides text/elements, comments
   workspaceEdit.ts         batchUpdate request builders (Markdown -> Docs, table cells, A1 ranges, Slides placement)
+  slideCopy.ts             Copies a slide into another deck (rebuilt element by element, inherited placeholder styles resolved)
   workspaceTools.ts        Workspace read tools, image_search, directory_search
   workspaceWriteTools.ts   Workspace write tools (drive_manage, drive_share, docs/sheets/slides_edit, *_batch_update, comments)
   fileTools.ts             send_file and extract_images (the img_N cache shared with the image tools)

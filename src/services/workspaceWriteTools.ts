@@ -8,7 +8,8 @@ import { fetchPublic } from '../utils/safeFetch';
 import { GDG_SHARED_DRIVE_ID } from '../config/googleWorkspace';
 import type { ChatMedia } from './ai';
 import { GoogleWorkspace, MIME, OFFICE_TO_NATIVE } from './googleWorkspace';
-import { docTables, docTabs, fileKind, findDocText, findSlide, parseA1Cell } from './workspaceFormat';
+import { SlideCopyPlan, createSlideRequests, emptyPlaceholders, planSlideCopy, slideMoveIndex } from './slideCopy';
+import { docTabLabel, docTables, docTabs, fileKind, findDocText, findSlide, parseA1Cell } from './workspaceFormat';
 import {
   CellEdit, ChipSegment, a1ToGridRange, chipTextToDocsRequests, chipTextToSheetCell, docCellRange, parseChipText, docTableCellRequests, findElement, imageFormula, markdownToDocsRequests, parseRequests, samePlacement,
   sheetFormatRequest, slidePlacement, slideSetTextRequests,
@@ -302,16 +303,19 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const docsEdit = new ExtendedDynamicStructuredTool({
     name: 'docs_edit',
-    description: 'Edit a Google Doc. Read it with `docs_read_structure` first (and again after each edit, the indices change). Actions: insert_inline (text with smart chips inside a paragraph or table cell: [[person:email]], [[date:2026-11-21]] or [[date:2026-11-21T10:00]], [[file:link to a Drive file]]; e.g. after_text "Organiser:" or a table cell), insert_page_break, replace_text (find and replace everywhere), insert_markdown (headings #, bullets -, numbered 1., **bold**, *italic*, [links](url); at the end, after a paragraph containing after_text, or at a paragraph\'s start index), rewrite_markdown (replace the whole tab\'s content, confirm first), delete_range, insert_image, insert_table, table_set_cells, table_rows / table_columns (insert or delete), table_merge. Tables are numbered from 1 as in `docs_read_structure`. For anything else use `docs_batch_update`.',
+    description: 'Edit a Google Doc. Read it with `docs_read_structure` first (and again after each edit, the indices change). Actions: insert_inline (text with smart chips inside a paragraph or table cell: [[person:email]], [[date:2026-11-21]] or [[date:2026-11-21T10:00]], [[file:link to a Drive file]]; e.g. after_text "Organiser:" or a table cell), insert_page_break, replace_text (find and replace everywhere), insert_markdown (headings #, bullets -, numbered 1., **bold**, *italic*, [links](url); at the end, after a paragraph containing after_text, or at a paragraph\'s start index), rewrite_markdown (replace the whole tab\'s content, confirm first), delete_range, insert_image, insert_table, table_set_cells, table_rows / table_columns (insert or delete), table_merge, add_tab (a new tab, optionally inside another tab and with Markdown content), rename_tab, delete_tab (confirm first, its child tabs go too). Tables are numbered from 1 as in `docs_read_structure`. Every action works on one tab: tab, the link\'s tab, or the first tab. For anything else use `docs_batch_update`.',
     schema: z.object({
       url: fileUrl('Doc'),
-      action: z.enum(['insert_inline', 'insert_page_break', 'replace_text', 'insert_markdown', 'rewrite_markdown', 'delete_range', 'insert_image', 'insert_table', 'table_set_cells', 'table_rows', 'table_columns', 'table_merge']).describe('[Required]'),
+      action: z.enum(['insert_inline', 'insert_page_break', 'replace_text', 'insert_markdown', 'rewrite_markdown', 'delete_range', 'insert_image', 'insert_table', 'table_set_cells', 'table_rows', 'table_columns', 'table_merge', 'add_tab', 'rename_tab', 'delete_tab']).describe('[Required]'),
       text: z.string().optional().describe('[insert_inline] Text with chips, e.g. "OIC: [[person:azlan@nyp-gdg.com]], see [[file:https://docs.google.com/...]]".'),
       tab: z.string().optional().describe("[Optional] The tab's title or id, defaults to the link's tab or the first tab."),
+      new_name: z.string().optional().describe('[add_tab, rename_tab] The tab\'s new title (for add_tab, tab works too).'),
+      parent_tab: z.string().optional().describe('[Optional for add_tab] Put the new tab inside this tab (title or id).'),
+      position: z.number().int().min(1).optional().describe('[Optional for add_tab] Position among its sibling tabs, 1 = first. Defaults to the end.'),
       find: z.string().optional().describe('[replace_text] Text to find.'),
       replace: z.string().optional().describe('[replace_text] The replacement (empty removes it).'),
       match_case: z.boolean().optional().describe('[Optional for replace_text] Defaults to false.'),
-      markdown: z.string().optional().describe('[insert_markdown, rewrite_markdown] The content.'),
+      markdown: z.string().optional().describe('[insert_markdown, rewrite_markdown; optional for add_tab] The content.'),
       after_text: z.string().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert after the paragraph containing this text. [insert_inline, insert_page_break] Insert right after this text (it can be inside a table cell).'),
       at: z.number().int().optional().describe('[Optional for insert_markdown, insert_image, insert_table] Insert at this index (the start index of a paragraph from docs_read_structure). [insert_inline, insert_page_break] Any index. Defaults to the end.'),
       start: z.number().int().optional().describe('[delete_range] Start index.'),
@@ -336,7 +340,8 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       const file = await editable(a.url, MIME.doc, 'Google Doc');
       const documentId = file.id!;
       const doc = await ws.getDoc(documentId);
-      const tab = ws.pickTab(doc, a.tab ?? file.ref.tabId);
+      // For add_tab, tab is the new tab's title (as in sheets_edit add_tab), which isn't there yet
+      const tab = ws.pickTab(doc, (a.action == 'add_tab' ? undefined : a.tab) ?? file.ref.tabId);
       const tabId = docTabs(doc).length > 1 || tab.id ? tab.id || undefined : undefined;
       const withTab = <T extends object>(o: T) => ({ ...o, ...(tabId ? { tabId } : {}) });
       const batch = (requests: docs_v1.Schema$Request[]) => ws.call(() => api().docs.documents.batchUpdate({ documentId, requestBody: { requests } }), documentId);
@@ -350,6 +355,8 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       };
       /** Where to insert: a paragraph start (`at`), after the paragraph containing `after_text`, or the end. */
       const where = (): { index: number, mode: 'paragraph' | 'end' } => {
+        // An empty tab (e.g. one just added) has a single empty paragraph: write over it rather than after it
+        if (bodyEnd <= 2) return { index: 1, mode: 'paragraph' };
         if (a.at != null) {
           if (a.at >= bodyEnd - 1) return { index: bodyEnd, mode: 'end' };
           if (!paragraphs.some(p => p.startIndex == a.at)) {
@@ -455,13 +462,21 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           if (!a.rows || !a.columns) throw Error('insert_table needs rows and columns.');
           const { index, mode } = where();
           await batch([{ insertTable: { rows: a.rows, columns: a.columns, ...(mode == 'end' ? { endOfSegmentLocation: withTab({}) } : { location: withTab({ index }) }) } }]);
-          if (a.contents?.length) {
-            // The new table is the first one at or after where it was inserted
-            const after = docTables(ws.pickTab(await ws.getDoc(documentId), tab.id || undefined).body);
-            const created = mode == 'end' ? after[after.length - 1] : after.find(t => t.startIndex >= index);
-            const cells: CellEdit[] = a.contents.flatMap((row: string[], r: number) => row.map((text, c) => ({ row: r + 1, col: c + 1, text }))).filter((c: CellEdit) => c.text && c.row <= a.rows && c.col <= a.columns);
-            if (created && cells.length) await batch(docTableCellRequests(created.table, cells, tabId));
+          // The new table is the first one at or after where it was inserted
+          const body = ws.pickTab(await ws.getDoc(documentId), tab.id || undefined).body;
+          const after = docTables(body);
+          const created = mode == 'end' ? after[after.length - 1] : after.find(t => t.startIndex >= index);
+          const requests: docs_v1.Schema$Request[] = [];
+          // A table added at the end after a list item is followed by an empty list item (seen 2026-10-25), make it normal text
+          const next = created && body.find(el => el.startIndex == created.endIndex);
+          if (mode == 'end' && next?.paragraph?.bullet && next.endIndex! - next.startIndex! <= 1) {
+            const range = withTab({ startIndex: next.startIndex!, endIndex: next.endIndex! });
+            requests.push({ deleteParagraphBullets: { range } }, { updateParagraphStyle: { range, paragraphStyle: { namedStyleType: 'NORMAL_TEXT' }, fields: 'namedStyleType' } });
           }
+          const cells: CellEdit[] = (a.contents ?? []).flatMap((row: string[], r: number) => row.map((text, c) => ({ row: r + 1, col: c + 1, text }))).filter((c: CellEdit) => c.text && c.row <= a.rows && c.col <= a.columns);
+          // Cells are filled from the end backwards, so the paragraph after the table goes first
+          if (created && cells.length) requests.push(...docTableCellRequests(created.table, cells, tabId));
+          if (requests.length) await batch(requests);
           return `Inserted a ${a.rows}x${a.columns} table in "${file.name}". ${file.webViewLink}`;
         }
         case 'table_set_cells': {
@@ -487,6 +502,32 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           await batch([{ mergeTableCells: { tableRange: { tableCellLocation: { tableStartLocation: tableStart(t), rowIndex: (a.row ?? 1) - 1, columnIndex: (a.column ?? 1) - 1 }, rowSpan: a.row_span ?? 1, columnSpan: a.column_span ?? 1 } } }]);
           return `Merged ${a.row_span ?? 1}x${a.column_span ?? 1} cells in table ${a.table}.`;
         }
+        case 'add_tab': {
+          a.new_name ??= a.tab;
+          if (!a.new_name?.trim()) throw Error('add_tab needs new_name (the new tab\'s title).');
+          const parent = a.parent_tab ? ws.pickTab(doc, a.parent_tab) : undefined;
+          const res = await batch([{ addDocumentTab: { tabProperties: { title: a.new_name, ...(parent?.id ? { parentTabId: parent.id } : {}), ...(a.position ? { index: a.position - 1 } : {}) } } }]);
+          const created = res.replies?.[0]?.addDocumentTab?.tabProperties?.tabId;
+          if (a.markdown?.trim() && created) await batch(markdownToDocsRequests(a.markdown, 1, 'paragraph', created));
+          return `Added tab "${a.new_name}" (id ${created})${parent ? ` inside "${parent.title}"` : ''} to "${file.name}". ${file.webViewLink?.replace(/\?.*$/, '')}?tab=${created}`;
+        }
+        case 'rename_tab': {
+          if (!a.new_name?.trim()) throw Error('rename_tab needs new_name.');
+          await batch([{ updateDocumentTabProperties: { tabProperties: { tabId: tab.id, title: a.new_name }, fields: 'title' } }]);
+          return `Renamed tab "${tab.title}" to "${a.new_name}".`;
+        }
+        case 'delete_tab': {
+          const tabs = docTabs(doc);
+          if (tabs.length == 1) throw Error(`"${tab.title}" is the only tab, a Doc needs at least one.`);
+          // A tab is picked by default, which would delete the first tab if Sofia forgot to say which one
+          if (!a.tab && !file.ref.tabId) throw Error(`Say which tab to delete with tab. Tabs: ${tabs.map(docTabLabel).join(', ')}`);
+          // docTabs lists tabs depth first, so the tabs inside this one follow it until one at its level or above
+          const start = tabs.findIndex(t => t.id == tab.id);
+          const end = tabs.findIndex((t, i) => i > start && t.level <= tab.level);
+          const children = tabs.slice(start + 1, end < 0 ? undefined : end);
+          await batch([{ deleteTab: { tabId: tab.id } }]);
+          return `Deleted tab "${tab.title}"${children.length ? ` and the tabs inside it (${children.map(c => `"${c.title}"`).join(', ')})` : ''}.`;
+        }
       }
       throw Error(`Unknown action ${a.action}.`);
     }
@@ -496,16 +537,18 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const sheetsEdit = new ExtendedDynamicStructuredTool({
     name: 'sheets_edit',
-    description: 'Edit a Google Sheet. Read it with `sheets_read` first. Actions: write_chips (one cell\'s text with smart chips: [[person:email]] and [[file:link to a Drive file]]; Sheets has no date chips), write (values or formulas into a range), append (rows after the last filled row), clear, add_tab (optionally with values from A1), rename_tab, merge / unmerge (a range), format (bold, colours, number format, alignment...), column_width, freeze (rows at the top), insert_image (an =IMAGE() formula in a cell, the image link must stay public). For anything else use `sheets_batch_update`.',
+    description: 'Edit a Google Sheet. Read it with `sheets_read` first. Actions: write_chips (one cell\'s text with smart chips: [[person:email]] and [[file:link to a Drive file]]; Sheets has no date chips), write (values or formulas into a range), append (rows after the last filled row), clear, add_tab (optionally with values from A1), rename_tab, duplicate_tab (a copy of a tab with its formatting, in this Sheet or another one with to_url), merge / unmerge (a range), format (bold, colours, number format, alignment...), column_width, freeze (rows at the top), insert_image (an =IMAGE() formula in a cell, the image link must stay public). For anything else use `sheets_batch_update`.',
     schema: z.object({
       url: fileUrl('Sheet'),
-      action: z.enum(['write_chips', 'write', 'append', 'clear', 'add_tab', 'rename_tab', 'merge', 'unmerge', 'format', 'column_width', 'freeze', 'insert_image']).describe('[Required]'),
+      action: z.enum(['write_chips', 'write', 'append', 'clear', 'add_tab', 'rename_tab', 'duplicate_tab', 'merge', 'unmerge', 'format', 'column_width', 'freeze', 'insert_image']).describe('[Required]'),
       text: z.string().optional().describe('[write_chips] e.g. "[[person:azlan@nyp-gdg.com]]" or "See [[file:https://docs.google.com/...]] for details".'),
       tab: z.string().optional().describe("[Optional] Tab name, id or position, defaults to the link's tab or the first tab. For add_tab, the new tab's name."),
       range: z.string().optional().describe('[write, clear, merge, unmerge, format, column_width] Cells, e.g. "A1:D10" (write: where the values start, e.g. "B2").'),
       values: grid2d.optional().describe('[write, add_tab] Rows of values; text starting with = is a formula.'),
       rows: grid2d.optional().describe('[append] Rows to add.'),
-      new_name: z.string().optional().describe('[rename_tab] The new name.'),
+      new_name: z.string().optional().describe('[rename_tab; optional for duplicate_tab] The new name (a copy defaults to "Copy of <tab>").'),
+      to_url: z.string().optional().describe('[Optional for duplicate_tab] Copy the tab into this other Sheet (its link) instead.'),
+      position: z.number().int().min(1).optional().describe('[Optional for duplicate_tab] Where the copy goes among the tabs, 1 = first. Defaults to after the original, or the end of the other Sheet.'),
       bold: z.boolean().optional(), italic: z.boolean().optional(), font_size: z.number().optional(),
       text_color: z.string().optional().describe('[format] e.g. #FFFFFF'), background: z.string().optional().describe('[format] e.g. #4285F4'),
       number_format: z.string().optional().describe('[format] e.g. "$#,##0.00" or "0%"'),
@@ -567,6 +610,25 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           await batch([{ updateSheetProperties: { properties: { sheetId, title: a.new_name }, fields: 'title' } }]);
           return `Renamed tab "${title}" to "${a.new_name}".`;
         }
+        case 'duplicate_tab': {
+          const other = a.to_url ? await editable(a.to_url, MIME.sheet, 'Google Sheet') : undefined;
+          if (!other || other.id == spreadsheetId) {
+            const res = await batch([{ duplicateSheet: { sourceSheetId: sheetId, insertSheetIndex: a.position ? a.position - 1 : (sheet.properties!.index ?? 0) + 1, ...(a.new_name ? { newSheetName: a.new_name } : {}) } }]);
+            const copy = res.replies?.[0]?.duplicateSheet?.properties;
+            return `Duplicated tab "${title}" as "${copy?.title}" (id ${copy?.sheetId}). ${file.webViewLink?.replace(/[?#].*$/, '')}#gid=${copy?.sheetId}`;
+          }
+          const copy = await ws.call(() => api().sheets.spreadsheets.sheets.copyTo({ spreadsheetId, sheetId, requestBody: { destinationSpreadsheetId: other.id! } }), other.id!);
+          // The copy is called "Copy of <tab>": it gets the tab's own name if the other Sheet has no tab called that
+          const taken = new Set((await ws.getSpreadsheet(other.id!)).sheets?.map(s => s.properties?.title?.toLowerCase()));
+          const name = a.new_name ?? (taken.has(title.toLowerCase()) ? undefined : title);
+          if (name || a.position) {
+            await ws.call(() => api().sheets.spreadsheets.batchUpdate({ spreadsheetId: other.id!, requestBody: { requests: [{ updateSheetProperties: { properties: { sheetId: copy.sheetId, ...(name ? { title: name } : {}), ...(a.position ? { index: a.position - 1 } : {}) }, fields: [name && 'title', a.position && 'index'].filter(Boolean).join(',') } }] } }), other.id!);
+          }
+          // Formulas pointing at other tabs (and named ranges) aren't copied with it, Google turns them into #REF!
+          const formulas = await ws.call(() => values.get({ spreadsheetId, range: `'${title.replace(/'/g, "''")}'`, valueRenderOption: 'FORMULA' })).catch(() => undefined);
+          const crossTab = (formulas?.values ?? []).flat().some(v => typeof v == 'string' && /^=.*!/.test(v));
+          return `Copied tab "${title}" into "${other.name}" as "${name ?? copy.title}" (id ${copy.sheetId}).${crossTab ? ' Some formulas refer to other tabs, which aren\'t in that Sheet: check them for #REF! with sheets_read (formulas: true).' : ''} ${other.webViewLink?.replace(/[?#].*$/, '')}#gid=${copy.sheetId}`;
+        }
         case 'merge':
         case 'unmerge': {
           const range = a1ToGridRange(needRange(), sheetId);
@@ -603,7 +665,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
 
   const slidesEdit = new ExtendedDynamicStructuredTool({
     name: 'slides_edit',
-    description: 'Edit a Google Slides deck. Read it with `slides_read` first (for element ids), and check the result with `google_view_slide`. Actions: replace_text (everywhere or on some slides), set_text (a shape, or a table cell with row/column), add_text_box, add_slide (with a layout from the deck, e.g. its branded layouts, and title/body), duplicate_slide, move_slide, delete_slide (confirm first), delete_element, insert_image (public link, Drive image or WhatsApp media_id), copy_image (from a slide of this or another deck to other slides, same place and size, e.g. a logo from the branding guide), insert_table, table_set_cells, table_rows (insert or delete), set_notes (speaker notes). Positions and sizes are in points (a slide is usually 720x405pt). For anything else use `slides_batch_update`.',
+    description: 'Edit a Google Slides deck. Read it with `slides_read` first (for element ids), and check the result with `google_view_slide`. Actions: replace_text (everywhere or on some slides), set_text (a shape, or a table cell with row/column), add_text_box, add_slide (with a layout from the deck, e.g. its branded layouts, and title/body), duplicate_slide (one or several slides, in this deck or copied into another deck with to_url), move_slide, delete_slide (confirm first), delete_element, insert_image (public link, Drive image or WhatsApp media_id), copy_image (from a slide of this or another deck to other slides, same place and size, e.g. a logo from the branding guide), insert_table, table_set_cells, table_rows (insert or delete), set_notes (speaker notes). Positions and sizes are in points (a slide is usually 720x405pt). For anything else use `slides_batch_update`.',
     schema: z.object({
       url: fileUrl('deck'),
       action: z.enum(['replace_text', 'set_text', 'add_text_box', 'add_slide', 'duplicate_slide', 'move_slide', 'delete_slide', 'delete_element', 'insert_image', 'copy_image', 'insert_table', 'table_set_cells', 'table_rows', 'set_notes']).describe('[Required]'),
@@ -612,13 +674,15 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
       find: z.string().optional().describe('[replace_text]'), replace: z.string().optional().describe('[replace_text]'),
       match_case: z.boolean().optional(),
       only_slides: z.array(z.string()).optional().describe('[Optional for replace_text] Only these slides (numbers or ids).'),
-      slides: z.array(z.string()).optional().describe('[Optional for delete_slide] Delete several slides at once (numbers or ids), instead of slide.'),
+      slides: z.array(z.string()).optional().describe('[Optional for delete_slide, duplicate_slide] Several slides at once (numbers or ids, in order), instead of slide.'),
+      to_url: z.string().optional().describe('[Optional for duplicate_slide] Copy the slides into this other deck (its link), at position or the end. Charts become images there; check the copies with google_view_slide.'),
+      design: z.enum(['source', 'destination']).optional().describe('[Optional for duplicate_slide with to_url] "source" (default) keeps the slides\' look, template included; "destination" uses the other deck\'s template: its layout of the same name, the text in its placeholders.'),
       text: z.string().optional().describe('[set_text, add_text_box, set_notes]'),
       row: z.number().int().min(1).optional().describe('[set_text in a table, table_rows]'),
       column: z.number().int().min(1).optional().describe('[set_text in a table]'),
       layout: z.string().optional().describe("[Optional for add_slide] A layout name from the deck (see slides_read), or one of TITLE, TITLE_AND_BODY, TITLE_ONLY, SECTION_HEADER, TITLE_AND_TWO_COLUMNS, BIG_NUMBER, BLANK."),
       title: z.string().optional().describe('[Optional for add_slide]'), body: z.string().optional().describe('[Optional for add_slide]'),
-      position: z.number().int().min(1).optional().describe('[Optional for add_slide, duplicate_slide; required for move_slide] Slide position, 1 = first.'),
+      position: z.number().int().min(1).optional().describe('[Optional for add_slide, duplicate_slide; required for move_slide] Slide position, 1 = first (for duplicate_slide, where the first copy goes; defaults to right after the original, or the end of the other deck).'),
       image: z.string().optional().describe('[insert_image] A public image link, a Drive image link, a WhatsApp image media_id, or img_N (generated image, icon or extracted image).'),
       x: z.number().optional(), y: z.number().optional(), width: z.number().optional(), height: z.number().optional(),
       from_url: z.string().optional().describe("[Optional for copy_image] The deck to copy from, defaults to this one."),
@@ -690,20 +754,7 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           }
           const slides = presentation.slides ?? [];
           const target = a.position ? Math.min(a.position - 1, slides.length) : slides.length;
-          // A slide can only be inserted next to slides using its layout's master (decks like the brand guide have
-          // several), so it's created after the last slide with that master, then moved where it should go
-          let createAt = target;
-          if (deckLayout) {
-            const layoutMaster = new Map((presentation.layouts ?? []).map(l => [l.objectId, l.layoutProperties?.masterObjectId]));
-            const master = deckLayout.layoutProperties?.masterObjectId;
-            const sameMaster = slides.map((s, i) => layoutMaster.get(s.slideProperties?.layoutObjectId ?? '') == master ? i : -1).filter(i => i >= 0);
-            if (sameMaster.length && !sameMaster.some(i => i == target - 1 || i == target)) createAt = sameMaster[sameMaster.length - 1] + 1;
-            else if (!sameMaster.length) createAt = 0;
-          }
-          await batch([
-            { createSlide: { objectId: id, insertionIndex: createAt, slideLayoutReference: deckLayout ? { layoutId: deckLayout.objectId! } : { predefinedLayout: (a.layout ?? 'TITLE_AND_BODY').toUpperCase() } } },
-            ...(createAt != target ? [{ updateSlidesPosition: { slideObjectIds: [id], insertionIndex: target > createAt ? target + 1 : target } }] : []),
-          ]);
+          await batch(createSlideRequests(presentation, id, deckLayout ? { layoutId: deckLayout.objectId!, page: deckLayout } : { predefinedLayout: (a.layout ?? 'TITLE_AND_BODY').toUpperCase() }, target));
           // Fill the new slide's placeholders by type, whatever the layout calls them
           const notes: string[] = [];
           if (a.title || a.body) {
@@ -722,14 +773,51 @@ export function createWorkspaceWriteTools(ws: GoogleWorkspace, options: WriteToo
           return `Added slide ${id}.${missing} ${link}`;
         }
         case 'duplicate_slide': {
-          const res = await batch([{ duplicateObject: { objectId: slideId() } }]);
-          const copy = res.replies?.[0]?.duplicateObject?.objectId;
-          if (copy && a.position) await batch([{ updateSlidesPosition: { slideObjectIds: [copy], insertionIndex: a.position - 1 } }]);
-          return `Duplicated slide ${a.slide} as ${copy}. ${link}`;
+          // Ids are looked up first, so numbers don't shift while copying
+          const sources: string[] = (a.slides?.length ? a.slides : [a.slide]).map((s: string) => slideId(s));
+          const other = a.to_url ? await editable(a.to_url, MIME.slides, 'Google Slides deck') : undefined;
+          if (!other || other.id == presentationId) {
+            // In the same deck each copy lands right after its original unless a position is given
+            const res = await batch(sources.map(objectId => ({ duplicateObject: { objectId } })));
+            const copies = (res.replies ?? []).map(r => r.duplicateObject?.objectId!).filter(Boolean);
+            if (copies.length && a.position) {
+              const order = ((await ws.getPresentation(presentationId)).slides ?? []).map(s => s.objectId!);
+              await batch([{ updateSlidesPosition: { slideObjectIds: copies, insertionIndex: slideMoveIndex(order, copies, a.position) } }]);
+            }
+            return `Duplicated ${sources.length == 1 ? `slide ${a.slide ?? a.slides[0]}` : `${sources.length} slides`} as ${copies.join(', ')}. ${link}`;
+          }
+          const results: string[] = [];
+          const skipped = new Set<string>();
+          let deck = await ws.getPresentation(other.id!);
+          let at = a.position ? Math.min(a.position - 1, deck.slides?.length ?? 0) : deck.slides?.length ?? 0;
+          for (const source of sources) try {
+            const copy: SlideCopyPlan = planSlideCopy(presentation, findSlide(presentation, source).slide, deck, at, a.design ?? 'source', newId);
+            await ws.call(() => api().slides.presentations.batchUpdate({ presentationId: other.id!, requestBody: { requests: copy.requests } }), other.id!);
+            deck = await ws.getPresentation(other.id!);
+            // Speaker notes and leftover empty placeholders need the new slide's ids, which are only known now
+            const created = deck.slides?.find(s => s.objectId == copy.slideId);
+            const notesId = created?.slideProperties?.notesPage?.notesProperties?.speakerNotesObjectId;
+            const followUp: slides_v1.Schema$Request[] = [
+              ...emptyPlaceholders(created).map(objectId => ({ deleteObject: { objectId } })),
+              ...(copy.notes && notesId ? [{ insertText: { objectId: notesId, insertionIndex: 0, text: copy.notes } }] : []),
+            ];
+            if (followUp.length) await ws.call(() => api().slides.presentations.batchUpdate({ presentationId: other.id!, requestBody: { requests: followUp } }), other.id!);
+            copy.skipped.forEach(s => skipped.add(s));
+            const index = (deck.slides ?? []).findIndex(s => s.objectId == copy.slideId);
+            results.push(`slide ${(presentation.slides ?? []).findIndex(s => s.objectId == source) + 1} -> slide ${index + 1} (${copy.slideId}${copy.placeholders ? `, its "${copy.layout}" layout` : ''})`);
+            at = index + 1;
+          }
+          catch (e: any) {
+            // The ones already copied are in the other deck, so copying them again would make doubles
+            if (!results.length) throw e;
+            throw Error(`${e.message} This happened after copying ${results.join(', ')}, so only copy the rest again.`);
+          }
+          return `Copied ${results.length == 1 ? 'the slide' : `${results.length} slides`} into "${other.name}": ${results.join(', ')}.${skipped.size ? ` Couldn't copy ${[...skipped].join(', ')}.` : ''} Check them with google_view_slide. ${other.webViewLink}`;
         }
         case 'move_slide': {
           if (!a.position) throw Error('move_slide needs position.');
-          await batch([{ updateSlidesPosition: { slideObjectIds: [slideId()], insertionIndex: a.position - 1 } }]);
+          const moving = slideId();
+          await batch([{ updateSlidesPosition: { slideObjectIds: [moving], insertionIndex: slideMoveIndex((presentation.slides ?? []).map(s => s.objectId!), [moving], a.position) } }]);
           return `Moved slide ${a.slide} to position ${a.position}.`;
         }
         case 'delete_slide': {
