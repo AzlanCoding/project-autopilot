@@ -31,6 +31,7 @@ This project is only meant to be used by 1 class. This class named IT2504 is a c
 *   Knows who is in a group chat: the group's description and every participant with their user description are in her prompt, and `get_group_info` shows any group.
 *   Sends WhatsApp polls and reads their votes (who voted for what). See *Baileys doesn't decrypt poll votes* under Known Issues.
 *   Sofia will wait for user to finish typing for 3 seconds after a message is received before taking any action. This means that when a message is sent, Sofia should only take action after 3 seconds if no new message was sent or no typing activity was detected. This also attempts to help prevent spam. Note that typing activity detection does not affect this for group chats.
+*   Retries a model request that fails with a transient server error (e.g. Model Studio's ModelService answering 503 when it is overloaded, which used to end the reply silently): 3 retries waiting 30s, then 40s and 50s, keeping everything the failed attempt already did (tool results, text already sent). Permanent failures like an unknown model id fail immediately.
 
 
 ## Future Proposed Features
