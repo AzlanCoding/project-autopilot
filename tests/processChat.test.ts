@@ -12,9 +12,12 @@ function fakeAI(turns: any[][], extraTools: any[] = []) {
   const requests: any[][] = [];
   /** The `tools` sent with each request */
   const toolsSent: any[][] = [];
+  /** Waits before model request retries, in order (see `MODEL_RETRY_MAX` in ai.ts) */
+  const sleeps: number[] = [];
   const ai = Object.create(AI.prototype) as AI;
   Object.assign(ai, {
     logger: pino({ level: 'silent' }),
+    sleep: async (ms: number) => { sleeps.push(ms); },
     memoryQueryTool: { func: async () => '[]' },
     aboutToAct: async () => 0, // Never nudge unless a test says so
     builtinTools: [],
@@ -37,14 +40,16 @@ function fakeAI(turns: any[][], extraTools: any[] = []) {
                   yield { type: 'response.output_text.delta', delta };
                 }
               }
-              yield { type: 'response.output_item.done', item };
+              if (!item.noDone) { // `noDone` simulates a response that dies before the message item completes
+                yield { type: 'response.output_item.done', item };
+              }
             }
           })();
         }
       }
     },
   });
-  return { ai, requests, toolsSent };
+  return { ai, requests, toolsSent, sleeps };
 }
 
 const message = (text: string) => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
@@ -323,6 +328,70 @@ test('a failed model request (e.g. an unknown model id) throws instead of silent
   await assert.rejects(run(ai), /Model request failed \(server_error\): Model not found: DeepSeek-V4.1-Flash-1017/);
   const errored = fakeAI([[{ event: { type: 'error', code: 'rate_limit', message: 'Too many requests' } }]]);
   await assert.rejects(run(errored.ai), /Model request failed \(rate_limit\): Too many requests/);
+});
+
+const overloaded = (message: string) => ({
+  event: { type: 'response.failed', response: { error: { code: 'server_error', message: `External service ModelService error: <503> InternalError.Algo: ${message}` } } },
+});
+
+test('a request failed by an overloaded model service (503) is retried after 30s and the reply continues', async () => {
+  const { ai, requests, sleeps } = fakeAI([
+    [overloaded('An error occurred in model serving, error message is: [ViT queue is full: admitted=383, capacity=384, requested=8]')],
+    [message('Back online!')],
+  ]);
+  assert.deepEqual(await run(ai), ['Back online!']);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(sleeps, [30000]);
+});
+
+test('retries wait 10s longer per turn and the reply fails after 3 retries', async () => {
+  const failure = overloaded('overloaded');
+  const { ai, requests, sleeps } = fakeAI([[failure], [failure], [failure], [failure]]);
+  await assert.rejects(run(ai), /Model request failed \(server_error\): External service ModelService error: <503>/);
+  assert.equal(requests.length, 4); // The first request and the 3 retries
+  assert.deepEqual(sleeps, [30000, 40000, 50000]);
+});
+
+test('text already sent before a 503 failure is kept in the retried request, so it is not repeated', async () => {
+  const partial = { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'One sec,\n\nchecking!' }] };
+  const { ai, requests } = fakeAI([
+    [{ ...partial, chunks: ['One sec,\n\n', 'checking!'], noDone: true }, overloaded('overloaded')],
+    [message('Done!')],
+  ]);
+  assert.deepEqual(await run(ai), ['One sec,', 'Done!']); // The unsent "checking!" is dropped
+  assert.equal(requests.length, 2);
+  assert.ok(requests[1].some((i: any) => i.type == 'message' && i.role == 'assistant' && i.content == 'One sec,'));
+});
+
+test('a tool call that ran before a 503 failure keeps its output in the retried request and does not run again', async () => {
+  const calls: string[] = [];
+  const { ai, requests } = fakeAI([
+    [call('memory_write', { text: 'likes cats' }, 'c1'), overloaded('overloaded')],
+    [message('Saved!')],
+  ], [fakeTool('memory_write', calls, 'Memory saved.')]);
+  assert.deepEqual(await run(ai), ['Saved!']);
+  assert.deepEqual(calls, ['memory_write {"text":"likes cats"}']);
+  assert.deepEqual(requests[1].filter((i: any) => i.type == 'function_call_output'), [
+    { output: 'Memory saved.', call_id: 'c1', type: 'function_call_output' },
+  ]);
+});
+
+test('an overloaded service failing before the stream starts (HTTP 503) is retried too', async () => {
+  const { ai, requests, sleeps } = fakeAI([[message('Back!')]]);
+  const create = (ai.openai.responses as any).create;
+  let calls = 0;
+  (ai.openai.responses as any).create = async (params: any, options: any) => {
+    if (++calls == 1) {
+      const e: any = new Error('Service Unavailable');
+      e.status = 503;
+      throw e;
+    }
+    return create(params, options);
+  };
+  assert.deepEqual(await run(ai), ['Back!']);
+  assert.equal(calls, 2); // The first attempt threw, the second reached the model
+  assert.equal(requests.length, 1);
+  assert.deepEqual(sleeps, [30000]);
 });
 
 test("Model Studio's built-in tools are off by default", async () => {

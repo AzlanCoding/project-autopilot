@@ -102,6 +102,13 @@ users get "Error: Unknown User. Please contact Azlan for access!".
 Each model request streams; every blank line in the text is sent as a new WhatsApp message, and tool calls run as soon as
 they finish streaming.
 
+**Retrying a failed request.** Model Studio sometimes fails a request with 503 when its model service is overloaded
+(2026-11-05: "[ViT queue is full]"), which used to end the reply silently. A transient failure (a 5xx status, reported
+in the event's message as `<503>` or on the error itself) is retried up to 3 times, waiting 30s and then 10s more per
+turn; permanent ones (an unknown model id) fail immediately. Everything the failed attempt already put in the history
+stays there: tool calls keep their outputs so nothing runs twice, and text already sent to WhatsApp is kept so it isn't
+repeated (the unsent rest is dropped). After the last retry the reply fails like before.
+
 **Stopping for new messages.** A message that arrives while Sofia is replying flags the running reply
 (`BufferSystem.takeNewMessages`). The flag is checked at points where stopping loses nothing: her thinking has finished,
 a WhatsApp message has been sent, or a tool call has run (never halfway through writing one). If it's set and

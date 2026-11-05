@@ -137,6 +137,28 @@ export function describeBuiltinToolCall(item: any): string {
 }
 const INTERRUPTED_NOTE = "Your reply was stopped after the messages above (they were already sent) because new messages arrived. Continue your reply taking them into account, don't repeat what you already sent.";
 
+/**
+ * Retries for model requests that fail with a transient server error, e.g. Model Studio's ModelService answering 503
+ * when it is overloaded (2026-11-05: "External service ModelService error: <503> InternalError.Algo ... [ViT queue is
+ * full]" failed responses before any output, so Sofia silently didn't reply). The first retry waits 30s and each turn
+ * waits 10s more; after `MODEL_RETRY_MAX` retries the request fails like before. Failures at the HTTP level are
+ * already retried by the OpenAI client itself (2 attempts), this covers the failures Model Studio reports as events.
+ */
+const MODEL_RETRY_MAX = 3;
+const MODEL_RETRY_BASE_DELAY_MS = 30_000;
+const MODEL_RETRY_DELAY_STEP_MS = 10_000;
+/** Wait before the `retry`-th retry of a failed request: 30s, then 10s more per turn. */
+const modelRetryDelayMs = (retry: number) => MODEL_RETRY_BASE_DELAY_MS + MODEL_RETRY_DELAY_STEP_MS * (retry - 1);
+/**
+ * Whether a failed model request is worth retrying: a transient server-side problem (overloaded service, rate limit),
+ * not a permanent one like an unknown model id. Model Studio reports the status inside the message as `<503>`;
+ * HTTP-level errors from the OpenAI client carry a numeric `status`.
+ */
+const isTransientModelError = (e: any): boolean => {
+  const status = Number(e?.status ?? /<(\d{3})>/.exec(e?.message ?? '')?.[1] ?? 0);
+  return status == 429 || (status >= 500 && status <= 599);
+};
+
 export interface ScheduledTaskRunOptions {
   /** Whether the model must send a message with send_message. Defaults to true. */
   requireMessage?: boolean;
@@ -149,6 +171,8 @@ export default class AI {
   test_mode: boolean = (process.env.TESTING != undefined && process.env.TESTING.toLowerCase() == "true");
   /** How likely the end of a reply says Sofia is about to act without having done it, see `unfinishedReply.ts`. */
   aboutToAct: (text: string) => Promise<number> = aboutToActProbability;
+  /** Waits before retrying a failed model request (see `MODEL_RETRY_MAX`); tests stub this to skip the wait. */
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   /** Model Studio's built-in tools sent with every request, from `BUILTIN_TOOLS` (none by default). */
   builtinTools: string[] = BUILTIN_TOOLS;
   /** Whether Sofia can search the web and read pages, and through which provider's tools (see `USE_WEB_TOOLS`). */
@@ -1662,7 +1686,9 @@ ${await message()}`,
       //   return out;
       // };
 
-      const handleStream = async function* (instance: AI): AsyncGenerator<{
+      // `retryAttempt` counts the retries this request already used; a continuation (after tool calls, an interrupt
+      // or a nudge) is a new request and starts from 0 again
+      const handleStream = async function* (instance: AI, retryAttempt = 0): AsyncGenerator<{
         type: 'chunk_display' | 'done',
         content: string,
         delimiter: boolean
@@ -1689,6 +1715,9 @@ ${await message()}`,
         let sentText = "";
         // Set when the response is stopped for new messages, these are added before the next response
         let interrupted: ResponseInputItem[] | null = null;
+        // Set when the response fails with a transient server error (e.g. Model Studio overloaded): the request is
+        // retried below, waiting longer each turn
+        let failed: Error | null = null;
         // Results of this response's tool calls, added after its consecutive calls instead of after each one. DeepSeek's own
         // API rejects call, result, call, result: the second call ends up without the thinking it needs (tested 2026-10-25)
         const toolOutputs: ResponseInputItem.FunctionCallOutput[] = [];
@@ -1698,27 +1727,42 @@ ${await message()}`,
         // Start streaming from the Responses API
         // The official client exposes a streaming helper `client.responses.stream`.
         // We pass `input` as the messages array.
-        const stream = await instance.openai.responses.create({
-          model: CHAT_MODEL,
-          input: chatHistory,
-          stream: true,
-          tools: [
-            ...instance.tools.map((t) => ({
-              type: "function" as const,
-              name: t.name,
-              description: t.description,
-              parameters: z.toJSONSchema(t.schema as any, {
-                target: 'draft-7',
-              }),
-              strict: true
-            })),
-            // Model Studio's built-in tools, not in the OpenAI SDK's types
-            ...instance.builtinTools.map(type => ({ type }) as any),
-          ],
-          tool_choice: "auto",
-          // You can pass additional options here (e.g., temperature) if desired
-          ...additionalOptions
-        }, { signal: controller.signal });
+        let stream;
+        try {
+          stream = await instance.openai.responses.create({
+            model: CHAT_MODEL,
+            input: chatHistory,
+            stream: true,
+            tools: [
+              ...instance.tools.map((t) => ({
+                type: "function" as const,
+                name: t.name,
+                description: t.description,
+                parameters: z.toJSONSchema(t.schema as any, {
+                  target: 'draft-7',
+                }),
+                strict: true
+              })),
+              // Model Studio's built-in tools, not in the OpenAI SDK's types
+              ...instance.builtinTools.map(type => ({ type }) as any),
+            ],
+            tool_choice: "auto",
+            // You can pass additional options here (e.g., temperature) if desired
+            ...additionalOptions
+          }, { signal: controller.signal });
+        }
+        catch (e) {
+          // An overloaded service can also refuse the request before the stream starts (HTTP 503). The OpenAI client
+          // already retries these twice with a short backoff; this rides out a longer overload window.
+          if (retryAttempt < MODEL_RETRY_MAX && isTransientModelError(e)) {
+            const delayMs = modelRetryDelayMs(retryAttempt + 1);
+            instance.logger.warn({ err: e, retry: retryAttempt + 1, max: MODEL_RETRY_MAX }, `Model request failed, retrying in ${Math.round(delayMs / 1000)}s`);
+            await instance.sleep(delayMs);
+            yield* handleStream(instance, retryAttempt + 1);
+            return;
+          }
+          throw e;
+        }
 
         events: for await (const event of stream) {
           instance.logger.trace(event, "CHAT EVENT");
@@ -1760,7 +1804,7 @@ ${await message()}`,
               instance.logger.info(`Called ${event.item.name}`)
               const tool = toolMap[event.item.name];
               let result: string;
-              let failed = false;
+              let toolFailed = false;
               try {
                 if (!tool) {
                   result = `Error: Unknown tool "${event.item.name}"`;
@@ -1795,7 +1839,7 @@ ${await message()}`,
               }
               catch (err: any) {
                 console.error(err);
-                failed = true;
+                toolFailed = true;
                 result = `Tool execution error:${err.message}\nToolArgs: ${tool?.usage_str}`;
               }
               console.trace(result);
@@ -1869,7 +1913,14 @@ ${await message()}`,
             // Model Studio reports failed requests (e.g. an unknown model id) as an event, not an HTTP error. Without this
             // the stream just ends and Sofia silently doesn't reply.
             const error = event.type == 'error' ? event : event.response.error;
-            throw Error(`Model request failed (${error?.code ?? 'unknown'}): ${error?.message ?? 'no message'}`);
+            const err = Error(`Model request failed (${error?.code ?? 'unknown'}): ${error?.message ?? 'no message'}`);
+            // An overloaded ModelService answers 503 (2026-11-05: "[ViT queue is full]", before any output); waiting a
+            // turn gets the same request through. Permanent failures (an unknown model id) are not worth a retry.
+            if (retryAttempt < MODEL_RETRY_MAX && isTransientModelError(err)) {
+              failed = err;
+              break events;
+            }
+            throw err;
           }
           else if (event.type == "response.output_text.delta") {
             if (ended) {
@@ -1905,6 +1956,22 @@ ${await message()}`,
           }
         }
 
+        if (failed) {
+          const delayMs = modelRetryDelayMs(retryAttempt + 1);
+          // Everything this attempt finished stays in the history: tool calls that already ran keep their outputs,
+          // and text already sent to WhatsApp is kept so the retried request continues it instead of repeating it
+          flushToolOutputs();
+          chatHistory.push(...images);
+          if (sentText.trim()) {
+            chatHistory.push({ role: 'assistant', content: sentText, type: 'message' } as EasyInputMessage);
+          }
+          // The unsent rest of a half-streamed message is dropped, the retried request writes it again
+          buffer = "";
+          instance.logger.warn({ err: failed, retry: retryAttempt + 1, max: MODEL_RETRY_MAX }, `Model request failed, retrying in ${Math.round(delayMs / 1000)}s`);
+          await instance.sleep(delayMs);
+          yield* handleStream(instance, retryAttempt + 1);
+          return;
+        }
         flushToolOutputs();
         chatHistory.push(...images);
         if (interrupted) {
